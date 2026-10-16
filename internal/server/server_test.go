@@ -77,7 +77,7 @@ func testState(fa, fb exchanger, minTTL uint32) *state {
 		groups:       map[string]exchanger{"a": fa, "b": fb},
 		def:          fa,
 		defName:      "a",
-		timeout:      time.Second,
+		budget:       time.Second,
 		cacheEnabled: true,
 		minTTL:       minTTL,
 	}
@@ -242,5 +242,31 @@ func TestReloadSwapsState(t *testing.T) {
 	}
 	if s.st.Load() == old {
 		t.Fatalf("state not swapped")
+	}
+}
+
+// TestBuildStateRequestBudget проверяет, что общий бюджет запроса вмещает все
+// попытки группы (primary + fallback), иначе fallback не успевает сработать.
+func TestBuildStateRequestBudget(t *testing.T) {
+	cfg, err := config.Parse([]byte(`
+upstream: {timeout: 2s}
+groups:
+  a:
+    protocol: udp
+    primary: ["192.168.1.1:53"]
+    fallback: ["doh+https://9.9.9.9/dns-query", "doh+https://94.140.14.14/dns-query"]
+default_group: a
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	st, err := buildState(cfg, cfg.Timeout(), false)
+	if err != nil {
+		t.Fatalf("buildState: %v", err)
+	}
+	defer closeState(st)
+	// 1 primary + 2 fallback = 3 попытки → бюджет = 3 × 2s.
+	if st.budget != 6*time.Second {
+		t.Fatalf("budget = %s, want 6s", st.budget)
 	}
 }

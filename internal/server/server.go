@@ -32,7 +32,7 @@ type state struct {
 	groups       map[string]exchanger
 	def          exchanger
 	defName      string
-	timeout      time.Duration
+	budget       time.Duration // общий бюджет запроса: per-attempt timeout × макс. попыток группы
 	cacheEnabled bool
 	minTTL       uint32
 	maxTTL       uint32
@@ -78,6 +78,9 @@ func (s *Server) Reload(cfg *config.Config) error {
 
 func buildState(cfg *config.Config, timeout time.Duration, cacheEnabled bool) (*state, error) {
 	groups := make(map[string]exchanger, len(cfg.Groups))
+	// Бюджет запроса должен вмещать все попытки группы (primary + fallback),
+	// иначе первая же «висящая» попытка съест весь бюджет и fallback не сработает.
+	maxAttempts := 1
 	for name, g := range cfg.Groups {
 		grp, err := upstream.NewGroup(name, g, timeout)
 		if err != nil {
@@ -87,13 +90,16 @@ func buildState(cfg *config.Config, timeout time.Duration, cacheEnabled bool) (*
 			return nil, err
 		}
 		groups[name] = grp
+		if n := len(g.Primary) + len(g.Fallback); n > maxAttempts {
+			maxAttempts = n
+		}
 	}
 	return &state{
 		matcher:      rules.New(cfg.Rules),
 		groups:       groups,
 		def:          groups[cfg.DefaultGroup],
 		defName:      cfg.DefaultGroup,
-		timeout:      timeout,
+		budget:       time.Duration(maxAttempts) * timeout,
 		cacheEnabled: cacheEnabled,
 		minTTL:       cfg.Cache.MinTTL,
 		maxTTL:       cfg.Cache.MaxTTL,
@@ -131,7 +137,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), st.timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), st.budget)
 	defer cancel()
 
 	up := r.Copy()
