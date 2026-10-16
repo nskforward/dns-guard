@@ -26,15 +26,17 @@ type Resolver interface {
 //   - udp: "8.8.8.8" или "8.8.8.8:53"
 //   - dot: "dns.google" или "dns.google:853"
 //   - doh: "https://dns.google/dns-query"
-func New(proto, addr string, bootstrap []string, timeout time.Duration) (Resolver, error) {
+//
+// hosts — статический маппинг хостнейм→IP (используется вместо резолва для DoH/DoT).
+func New(proto, addr string, bootstrap []string, hosts map[string]string, timeout time.Duration) (Resolver, error) {
 	proto = strings.ToLower(strings.TrimSpace(proto))
 	switch proto {
 	case "udp":
 		return newUDP(normalizeHostPort(addr, 53), timeout), nil
 	case "dot":
-		return newDoT(normalizeHostPort(addr, 853), bootstrap, timeout)
+		return newDoT(normalizeHostPort(addr, 853), bootstrap, hosts, timeout)
 	case "doh":
-		return newDoH(addr, bootstrap, timeout)
+		return newDoH(addr, bootstrap, hosts, timeout)
 	default:
 		return nil, fmt.Errorf("unknown protocol %q", proto)
 	}
@@ -55,14 +57,14 @@ type Group struct {
 func NewGroup(name string, g config.Group, timeout time.Duration) (*Group, error) {
 	grp := &Group{Name: name, timeout: timeout}
 	for _, a := range g.Primary {
-		r, err := New(g.Protocol, a, g.Bootstrap, timeout)
+		r, err := New(g.Protocol, a, g.Bootstrap, g.Hosts, timeout)
 		if err != nil {
 			return nil, fmt.Errorf("group %q primary %q: %w", name, a, err)
 		}
 		grp.primary = append(grp.primary, r)
 	}
 	for _, a := range g.Fallback {
-		r, err := New(g.Protocol, a, g.Bootstrap, timeout)
+		r, err := New(g.Protocol, a, g.Bootstrap, g.Hosts, timeout)
 		if err != nil {
 			return nil, fmt.Errorf("group %q fallback %q: %w", name, a, err)
 		}

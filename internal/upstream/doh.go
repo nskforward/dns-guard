@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 
@@ -19,13 +20,23 @@ type dohResolver struct {
 	client *http.Client
 }
 
-func newDoH(url string, bootstrap []string, timeout time.Duration) (*dohResolver, error) {
+func newDoH(url string, bootstrap []string, hosts map[string]string, timeout time.Duration) (*dohResolver, error) {
 	if url == "" {
 		return nil, fmt.Errorf("empty DoH url")
 	}
-	dialer := bootstrapDialer(bootstrap, timeout)
+	base := bootstrapDialer(bootstrap, timeout)
+	// Если хост URL есть в статическом маппинге, подменяем адрес соединения на
+	// IP, сохраняя хостнейм в URL для TLS-SNI и проверки сертификата.
+	dialContext := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if ip, ok := staticHost(hostOf(addr), hosts); ok {
+			if _, port, err := net.SplitHostPort(addr); err == nil {
+				addr = net.JoinHostPort(ip, port)
+			}
+		}
+		return base.DialContext(ctx, network, addr)
+	}
 	tr := &http.Transport{
-		DialContext:         dialer.DialContext,
+		DialContext:         dialContext,
 		ForceAttemptHTTP2:   true,
 		MaxIdleConns:        64,
 		MaxIdleConnsPerHost: 16,

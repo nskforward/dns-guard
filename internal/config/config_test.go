@@ -75,6 +75,11 @@ groups:
   g1: {protocol: udp}
 default_group: g1
 `,
+		"hosts value not an ip": `
+groups:
+  g1: {protocol: doh, primary: ["https://x/dns-query"], hosts: {x: not-an-ip}}
+default_group: g1
+`,
 		"min greater than max": `
 groups:
   g1: {primary: ["1.1.1.1"]}
@@ -86,6 +91,25 @@ cache: {enabled: true, min_ttl: 100, max_ttl: 10}
 		if _, err := Parse([]byte(yaml)); err == nil {
 			t.Errorf("%s: expected error, got nil", name)
 		}
+	}
+}
+
+func TestParseHostsNormalized(t *testing.T) {
+	cfg, err := Parse([]byte(`
+groups:
+  g1:
+    protocol: doh
+    primary: ["https://doh.example.test/dns-query"]
+    hosts:
+      "  DoH.Example.TEST ": " 157.228.153.163 "
+default_group: g1
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	ip, ok := cfg.Groups["g1"].Hosts["doh.example.test"]
+	if !ok || ip != "157.228.153.163" {
+		t.Fatalf("hosts not normalized: %+v", cfg.Groups["g1"].Hosts)
 	}
 }
 

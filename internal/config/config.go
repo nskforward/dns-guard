@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -53,6 +54,10 @@ type Group struct {
 	Primary   []string `yaml:"primary"`   // основные серверы
 	Fallback  []string `yaml:"fallback"`  // резервные серверы
 	Bootstrap []string `yaml:"bootstrap"` // plain-DNS для резолва DoH/DoT хостнеймов
+	// Hosts — статический маппинг хостнейм→IP для DoH/DoT: используется, когда
+	// резолв хостнейма апстрима недоступен (bootstrap-UDP закрыт). Хостнейм в
+	// URL сохраняется для TLS-SNI/проверки сертификата, а соединение идёт на IP.
+	Hosts map[string]string `yaml:"hosts"`
 }
 
 // Rule — правило маршрутизации зоны на группу апстримов.
@@ -172,6 +177,13 @@ func (c *Config) normalize() {
 		if g.Protocol == "" {
 			g.Protocol = "udp"
 		}
+		if len(g.Hosts) > 0 {
+			hosts := make(map[string]string, len(g.Hosts))
+			for h, ip := range g.Hosts {
+				hosts[strings.ToLower(strings.TrimSpace(h))] = strings.TrimSpace(ip)
+			}
+			g.Hosts = hosts
+		}
 		c.Groups[name] = g
 	}
 	if c.DefaultGroup == "" {
@@ -195,6 +207,14 @@ func (c *Config) Validate() error {
 		}
 		if len(g.Primary) == 0 && len(g.Fallback) == 0 {
 			return fmt.Errorf("group %q: no upstream servers configured", name)
+		}
+		for h, ip := range g.Hosts {
+			if strings.TrimSpace(h) == "" {
+				return fmt.Errorf("group %q: hosts contains empty host name", name)
+			}
+			if net.ParseIP(strings.Trim(strings.TrimSpace(ip), "[]")) == nil {
+				return fmt.Errorf("group %q: hosts[%q] is not an IP address: %q", name, h, ip)
+			}
 		}
 	}
 	for i, r := range c.Rules {

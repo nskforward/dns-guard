@@ -13,7 +13,8 @@ MIN/MAX-TTL, кэширует ответы в памяти и показывае
 - Группы апстримов с протоколом на группу: `udp` / `dot` / `doh`.
 - Primary + fallback: резервные серверы используются **только при ошибке
   запроса** к основным (фоновых health-check нет); основные — с ротацией.
-- Bootstrap-резолв хостнеймов DoH/DoT через заданный plain-DNS.
+- Bootstrap-резолв хостнеймов DoH/DoT через заданный plain-DNS либо
+  статический маппинг `hosts` (хостнейм→IP).
 - In-memory LRU-кэш с границами TTL (MIN-TTL пол, MAX-TTL потолок),
   кэширование негативных ответов (по SOA minttl). Сброс при рестарте.
 - Горячая перезагрузка конфигурации (SIGHUP или через веб-UI), без простоя.
@@ -73,6 +74,11 @@ groups:
     primary:  ["https://dns.google/dns-query"]
     fallback: ["https://cloudflare-dns.com/dns-query"]
     bootstrap: ["77.88.8.8"] # plain-DNS для резолва хостнеймов
+  c:
+    protocol: doh
+    primary:  ["https://doh.example.com:8443/secret/dns-query"]
+    fallback: ["https://9.9.9.9/dns-query"]
+    hosts: {"doh.example.com": "203.0.113.10"} # статический хостнейм→IP
 default_group: a
 rules:
   - zone: "ru"
@@ -82,6 +88,10 @@ rules:
 - `zone` нормализуется: `ru`, `*.ru`, `.ru` и `RU.` эквивалентны.
 - Для `dot`/`doh` указывайте хостнейм (`dns.google`) или URL
   (`https://dns.google/dns-query`). Порт по умолчанию: 53 (udp), 853 (dot).
+- `bootstrap` — plain-DNS для резолва хостнеймов апстримов. `hosts` —
+  статический маппинг хостнейм→IP (приоритетнее bootstrap): полезен, когда
+  plain-DNS до резолвера недоступен. Хостнейм остаётся в URL для TLS-SNI и
+  проверки сертификата, а соединение идёт на указанный IP.
 - Конфигурация применяется целиком: при изменении крайне рекомендуется
   оставить `default_group` существующим.
 

@@ -36,6 +36,16 @@ func bootstrapDialer(bootstrap []string, timeout time.Duration) *net.Dialer {
 	return d
 }
 
+// staticHost возвращает IP для хостнейма из статического маппинга hosts.
+// Имена сравниваются без учёта регистра (ключи нормализуются в config).
+func staticHost(host string, hosts map[string]string) (string, bool) {
+	if len(hosts) == 0 {
+		return "", false
+	}
+	ip, ok := hosts[strings.ToLower(host)]
+	return ip, ok
+}
+
 // hostOf выделяет хостнейм из "host:port".
 func hostOf(addr string) string {
 	if h, _, err := net.SplitHostPort(addr); err == nil {

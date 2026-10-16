@@ -30,6 +30,14 @@ groups:
     primary:  ["https://dns.google/dns-query"]
     fallback: ["https://cloudflare-dns.com/dns-query"]
     bootstrap: ["77.88.8.8"]  # plain-DNS для резолва хостнеймов DoH/DoT
+  c:                          # свой DoH-сервер по имени, соединение — на IP
+    protocol: doh
+    primary:  ["https://doh.example.com:8443/secret/dns-query"]
+    fallback: ["https://9.9.9.9/dns-query"]
+    # hosts — статический маппинг хостнейм→IP: используется, когда bootstrap-UDP
+    # до резолвера недоступен. Хостнейм остаётся в URL (TLS-SNI и проверка
+    # сертификата), а TCP-соединение идёт на указанный IP.
+    hosts: {"doh.example.com": "203.0.113.10"}
 
 default_group: a
 
