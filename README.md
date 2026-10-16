@@ -70,10 +70,9 @@ groups:
     primary:  ["77.88.8.8", "8.8.8.8"]
     fallback: ["1.1.1.1"]
   b:
-    protocol: doh
-    primary:  ["https://dns.google/dns-query"]
-    fallback: ["https://cloudflare-dns.com/dns-query"]
-    bootstrap: ["77.88.8.8"] # plain-DNS для резолва хостнеймов
+    protocol: udp            # UDP primary + DoH fallback через префикс
+    primary:  ["192.168.1.1:53"]
+    fallback: ["doh+https://9.9.9.9/dns-query"]
   c:
     protocol: doh
     primary:  ["https://doh.example.com:8443/secret/dns-query"]
@@ -88,10 +87,23 @@ rules:
 - `zone` нормализуется: `ru`, `*.ru`, `.ru` и `RU.` эквивалентны.
 - Для `dot`/`doh` указывайте хостнейм (`dns.google`) или URL
   (`https://dns.google/dns-query`). Порт по умолчанию: 53 (udp), 853 (dot).
+- Любой адрес апстрима может нести префикс `<udp|dot|doh>+`, который
+  перекрывает протокол группы. Это позволяет смешивать протоколы внутри одной
+  группы — например, UDP primary и DoH fallback:
+  ```yaml
+  b:
+    protocol: udp
+    primary:  ["192.168.1.1:53"]
+    fallback: ["doh+https://9.9.9.9/dns-query"]
+  ```
+  Префиксом считается только ведущий токен без `/`, `:`, `?`, поэтому знак `+`
+  внутри URL (`...?a=1+2`) префиксом не воспринимается. Неизвестный префикс
+  (`tcp+…`) — ошибка валидации.
 - `bootstrap` — plain-DNS для резолва хостнеймов апстримов. `hosts` —
   статический маппинг хостнейм→IP (приоритетнее bootstrap): полезен, когда
   plain-DNS до резолвера недоступен. Хостнейм остаётся в URL для TLS-SNI и
-  проверки сертификата, а соединение идёт на указанный IP.
+  проверки сертификата, а соединение идёт на указанный IP. `hosts` действует на
+  всю группу, включая fallback другого протокола.
 - Конфигурация применяется целиком: при изменении крайне рекомендуется
   оставить `default_group` существующим.
 

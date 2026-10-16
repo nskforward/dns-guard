@@ -20,16 +20,17 @@ upstream:
 
 # Группы вышестоящих серверов. Протокол задаётся на группу: udp | dot | doh.
 # primary используется первым (с ротацией), fallback — только при ошибке запроса.
+# Любой адрес может нести префикс "<udp|dot|doh>+", который перекрывает протокол
+# группы — так в одной группе смешиваются протоколы (UDP primary + DoH fallback).
 groups:
   a:                          # дефолтная группа — UDP
     protocol: udp
     primary:  ["77.88.8.8", "8.8.8.8"]
     fallback: ["1.1.1.1"]
-  b:                          # зона .ru — DoH
-    protocol: doh
-    primary:  ["https://dns.google/dns-query"]
-    fallback: ["https://cloudflare-dns.com/dns-query"]
-    bootstrap: ["77.88.8.8"]  # plain-DNS для резолва хостнеймов DoH/DoT
+  b:                          # зона .ru: UDP-primary + DoH-fallback
+    protocol: udp
+    primary:  ["192.168.1.1:53"]
+    fallback: ["doh+https://9.9.9.9/dns-query", "doh+https://94.140.14.14/dns-query"]
   c:                          # свой DoH-сервер по имени, соединение — на IP
     protocol: doh
     primary:  ["https://doh.example.com:8443/secret/dns-query"]

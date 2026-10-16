@@ -13,10 +13,10 @@ import (
 	"github.com/miekg/dns"
 )
 
-// TestDoHStaticHost проверяет, что hosts позволяет достучаться до DoH-апстрима
-// по имени, которое не резолвится системным DNS: соединение идёт на статический IP,
-// а хостнейм из URL при этом сохраняется.
-func TestDoHStaticHost(t *testing.T) {
+// newDoHTestServer поднимает тестовый DoH-сервер, отвечающий на любой запрос
+// фиксированной A-записью 192.0.2.1.
+func newDoHTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		q := new(dns.Msg)
@@ -35,7 +35,15 @@ func TestDoHStaticHost(t *testing.T) {
 		_, _ = w.Write(out)
 	})
 	srv := httptest.NewServer(handler)
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestDoHStaticHost проверяет, что hosts позволяет достучаться до DoH-апстрима
+// по имени, которое не резолвится системным DNS: соединение идёт на статический IP,
+// а хостнейм из URL при этом сохраняется.
+func TestDoHStaticHost(t *testing.T) {
+	srv := newDoHTestServer(t)
 
 	u, err := url.Parse(srv.URL)
 	if err != nil {

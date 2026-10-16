@@ -27,8 +27,17 @@ type Resolver interface {
 //   - dot: "dns.google" или "dns.google:853"
 //   - doh: "https://dns.google/dns-query"
 //
+// Адрес может нести необязательный префикс протокола ("udp+192.168.1.1:53",
+// "doh+https://9.9.9.9/dns-query"), который перекрывает аргумент proto — это
+// позволяет смешивать протоколы primary/fallback в одной группе.
+//
 // hosts — статический маппинг хостнейм→IP (используется вместо резолва для DoH/DoT).
 func New(proto, addr string, bootstrap []string, hosts map[string]string, timeout time.Duration) (Resolver, error) {
+	if p, rest, err := config.SplitProtocol(addr); err != nil {
+		return nil, err
+	} else if p != "" {
+		proto, addr = p, rest
+	}
 	proto = strings.ToLower(strings.TrimSpace(proto))
 	switch proto {
 	case "udp":

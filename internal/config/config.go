@@ -208,6 +208,11 @@ func (c *Config) Validate() error {
 		if len(g.Primary) == 0 && len(g.Fallback) == 0 {
 			return fmt.Errorf("group %q: no upstream servers configured", name)
 		}
+		for _, a := range append(append([]string{}, g.Primary...), g.Fallback...) {
+			if _, _, err := SplitProtocol(a); err != nil {
+				return fmt.Errorf("group %q: %w", name, err)
+			}
+		}
 		for h, ip := range g.Hosts {
 			if strings.TrimSpace(h) == "" {
 				return fmt.Errorf("group %q: hosts contains empty host name", name)
