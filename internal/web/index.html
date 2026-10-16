@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dns-guard</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --fg:#e6e8ec; --muted:#8a93a5; --accent:#4f9cf9; --ok:#3fb950; --warn:#d29922; --err:#f85149; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+  header { display:flex; align-items:center; gap:16px; padding:12px 20px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:2; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  nav { display:flex; gap:6px; }
+  nav button { background:transparent; color:var(--muted); border:1px solid transparent; padding:6px 12px; border-radius:8px; cursor:pointer; font-size:14px; }
+  nav button.active { color:var(--fg); background:var(--panel); border-color:var(--line); }
+  main { padding:20px; max-width:1100px; margin:0 auto; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .card .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  .card .v { font-size:22px; font-weight:600; margin-top:6px; }
+  .card .v.warn { color:var(--warn); }
+  table { width:100%; border-collapse:collapse; margin-top:20px; background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  th,td { text-align:left; padding:8px 12px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  tr:last-child td { border-bottom:none; }
+  .row { display:flex; align-items:center; justify-content:space-between; margin-top:20px; }
+  .muted { color:var(--muted); }
+  button.act { background:var(--accent); color:#fff; border:none; padding:8px 16px; border-radius:8px; cursor:pointer; font-size:14px; }
+  button.act.secondary { background:var(--panel); border:1px solid var(--line); color:var(--fg); }
+  textarea { width:100%; height:60vh; background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:10px; padding:14px; font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; resize:vertical; }
+  .msg { padding:8px 12px; border-radius:8px; margin-top:12px; display:none; }
+  .msg.ok { display:block; background:rgba(63,185,80,.15); color:var(--ok); }
+  .msg.err { display:block; background:rgba(248,81,73,.15); color:var(--err); white-space:pre-wrap; }
+  .hide { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>dns-guard</h1>
+  <nav>
+    <button id="tab-dash" class="active" onclick="showTab('dash')">Статистика</button>
+    <button id="tab-cfg" onclick="showTab('cfg')">Конфигурация</button>
+  </nav>
+  <span id="status" class="muted" style="margin-left:auto"></span>
+</header>
+<main>
+  <section id="view-dash">
+    <div class="cards">
+      <div class="card"><div class="k">Запросов</div><div class="v" id="c-total">—</div></div>
+      <div class="card"><div class="k">Из кэша</div><div class="v" id="c-hits">—</div></div>
+      <div class="card"><div class="k">Промахов</div><div class="v" id="c-misses">—</div></div>
+      <div class="card"><div class="k">Hit rate</div><div class="v" id="c-rate">—</div></div>
+      <div class="card"><div class="k">SERVFAIL</div><div class="v" id="c-servfail">—</div></div>
+      <div class="card"><div class="k">Доменов</div><div class="v" id="c-domains">—</div></div>
+      <div class="card"><div class="k">Записей в кэше</div><div class="v" id="c-cache">—</div></div>
+      <div class="card"><div class="k">Uptime</div><div class="v" id="c-uptime">—</div></div>
+    </div>
+    <div class="row">
+      <h3 style="margin:0">Top-100 доменов</h3>
+      <button class="act secondary" onclick="flushCache()">Сбросить кэш</button>
+    </div>
+    <table>
+      <thead><tr><th>#</th><th>Домен</th><th class="num">Запросов</th><th class="num">RPM сейчас</th><th class="num">Peak RPM</th></tr></thead>
+      <tbody id="top"></tbody>
+    </table>
+  </section>
+
+  <section id="view-cfg" class="hide">
+    <textarea id="yaml" spellcheck="false"></textarea>
+    <div class="row">
+      <span class="muted">Сохранение применяет конфигурацию на лету.</span>
+      <span>
+        <button class="act secondary" onclick="loadConfig()">Обновить</button>
+        <button class="act" onclick="saveConfig()">Сохранить</button>
+      </span>
+    </div>
+    <div id="cfg-msg" class="msg"></div>
+  </section>
+</main>
+<script>
+let timer = null;
+
+function showTab(which) {
+  const dash = which === 'dash';
+  document.getElementById('view-dash').classList.toggle('hide', !dash);
+  document.getElementById('view-cfg').classList.toggle('hide', dash);
+  document.getElementById('tab-dash').classList.toggle('active', dash);
+  document.getElementById('tab-cfg').classList.toggle('active', !dash);
+  if (dash) { refresh(); startTimer(); } else { stopTimer(); loadConfig(); }
+}
+
+function startTimer() { stopTimer(); timer = setInterval(refresh, 5000); }
+function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
+
+function fmt(n) { return (n ?? 0).toLocaleString('ru-RU'); }
+
+function uptime(sec) {
+  const d = Math.floor(sec/86400), h = Math.floor(sec%86400/3600), m = Math.floor(sec%3600/60), s = sec%60;
+  if (d) return d + 'd ' + h + 'h';
+  if (h) return h + 'h ' + m + 'm';
+  if (m) return m + 'm ' + s + 's';
+  return s + 's';
+}
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/stats', {cache:'no-store'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    document.getElementById('c-total').textContent = fmt(d.total);
+    document.getElementById('c-hits').textContent = fmt(d.cache_hits);
+    document.getElementById('c-misses').textContent = fmt(d.cache_misses);
+    const rate = d.total ? Math.round(d.cache_hits * 100 / d.total) : 0;
+    document.getElementById('c-rate').textContent = rate + '%';
+    const sf = document.getElementById('c-servfail');
+    sf.textContent = fmt(d.servfail);
+    sf.classList.toggle('warn', d.servfail > 0);
+    document.getElementById('c-domains').textContent = fmt(d.domains);
+    document.getElementById('c-cache').textContent = fmt(d.cache_len);
+    document.getElementById('c-uptime').textContent = uptime(d.uptime_seconds || 0);
+    const body = document.getElementById('top');
+    body.innerHTML = '';
+    (d.top || []).forEach((x, i) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td class="muted">' + (i+1) + '</td>' +
+        '<td></td>' +
+        '<td class="num">' + fmt(x.total) + '</td>' +
+        '<td class="num">' + fmt(x.current_minute) + '</td>' +
+        '<td class="num">' + fmt(x.peak_rpm) + '</td>';
+      tr.children[1].textContent = x.domain;
+      body.appendChild(tr);
+    });
+    document.getElementById('status').textContent = 'обновлено ' + new Date().toLocaleTimeString('ru-RU');
+  } catch (e) {
+    document.getElementById('status').textContent = 'ошибка: ' + e.message;
+  }
+}
+
+async function flushCache() {
+  if (!confirm('Очистить кэш DNS?')) return;
+  await fetch('/api/cache/flush', {method:'POST'});
+  refresh();
+}
+
+async function loadConfig() {
+  const msg = document.getElementById('cfg-msg');
+  msg.className = 'msg';
+  try {
+    const r = await fetch('/api/config', {cache:'no-store'});
+    const d = await r.json();
+    document.getElementById('yaml').value = d.yaml || '';
+  } catch (e) {
+    msg.className = 'msg err'; msg.textContent = e.message;
+  }
+}
+
+async function saveConfig() {
+  const msg = document.getElementById('cfg-msg');
+  msg.className = 'msg';
+  try {
+    const r = await fetch('/api/config', {
+      method:'PUT',
+      headers:{'Content-Type':'application/x-yaml'},
+      body: document.getElementById('yaml').value
+    });
+    const text = await r.text();
+    if (!r.ok) { msg.className = 'msg err'; msg.textContent = text.trim(); return; }
+    const d = JSON.parse(text);
+    document.getElementById('yaml').value = d.yaml || '';
+    msg.className = 'msg ok'; msg.textContent = 'Конфигурация сохранена и применена.';
+  } catch (e) {
+    msg.className = 'msg err'; msg.textContent = e.message;
+  }
+}
+
+refresh();
+startTimer();
+</script>
+</body>
+</html>

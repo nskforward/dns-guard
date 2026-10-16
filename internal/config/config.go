@@ -1,0 +1,212 @@
+// Package config описывает конфигурацию dns-guard: слушатели, кэш,
+// группы апстримов и правила маршрутизации по зонам.
+package config
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Config — корневая конфигурация сервиса.
+type Config struct {
+	Listen       Listen           `yaml:"listen"`
+	Web          Web              `yaml:"web"`
+	Cache        Cache            `yaml:"cache"`
+	Upstream     Upstream         `yaml:"upstream"`
+	Groups       map[string]Group `yaml:"groups"`
+	DefaultGroup string           `yaml:"default_group"`
+	Rules        []Rule           `yaml:"rules"`
+}
+
+// Listen — адреса, на которых сервис принимает DNS-запросы.
+type Listen struct {
+	UDP string `yaml:"udp"`
+	TCP string `yaml:"tcp"`
+}
+
+// Web — параметры встроенного веб-интерфейса.
+type Web struct {
+	Enabled bool   `yaml:"enabled"`
+	Listen  string `yaml:"listen"`
+}
+
+// Cache — параметры in-memory кэша DNS-ответов.
+type Cache struct {
+	Enabled    bool   `yaml:"enabled"`
+	MaxEntries int    `yaml:"max_entries"`
+	MinTTL     uint32 `yaml:"min_ttl"` // минимальный TTL в секундах (пол)
+	MaxTTL     uint32 `yaml:"max_ttl"` // максимальный TTL в секундах (0 = без ограничения)
+}
+
+// Upstream — общие параметры обращения к вышестоящим серверам.
+type Upstream struct {
+	Timeout string `yaml:"timeout"` // duration, по умолчанию 3s
+}
+
+// Group — группа апстримов с единым протоколом и набором primary/fallback.
+type Group struct {
+	Protocol  string   `yaml:"protocol"`  // udp | dot | doh
+	Primary   []string `yaml:"primary"`   // основные серверы
+	Fallback  []string `yaml:"fallback"`  // резервные серверы
+	Bootstrap []string `yaml:"bootstrap"` // plain-DNS для резолва DoH/DoT хостнеймов
+}
+
+// Rule — правило маршрутизации зоны на группу апстримов.
+type Rule struct {
+	Zone  string `yaml:"zone"`  // например "ru" или "example.com"
+	Group string `yaml:"group"` // имя группы
+}
+
+// Timeout возвращает таймаут обращения к апстриму.
+func (c *Config) Timeout() time.Duration {
+	if c.Upstream.Timeout == "" {
+		return 3 * time.Second
+	}
+	d, err := time.ParseDuration(c.Upstream.Timeout)
+	if err != nil || d <= 0 {
+		return 3 * time.Second
+	}
+	return d
+}
+
+// Default возвращает конфигурацию по умолчанию.
+func Default() *Config {
+	return &Config{
+		Listen: Listen{UDP: ":53", TCP: ":53"},
+		Web:    Web{Enabled: true, Listen: ":8080"},
+		Cache:  Cache{Enabled: true, MaxEntries: 10000, MinTTL: 60, MaxTTL: 0},
+		Upstream: Upstream{
+			Timeout: "3s",
+		},
+		Groups: map[string]Group{
+			"default": {
+				Protocol: "udp",
+				Primary:  []string{"77.88.8.8", "8.8.8.8"},
+				Fallback: []string{"1.1.1.1"},
+			},
+		},
+		DefaultGroup: "default",
+		Rules:        []Rule{},
+	}
+}
+
+// Load читает конфигурацию из файла. Если файла нет — возвращает Default.
+func Load(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Default(), nil
+		}
+		return nil, err
+	}
+	cfg := Default()
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	cfg.normalize()
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// Parse разбирает и валидирует конфигурацию из байт.
+func Parse(data []byte) (*Config, error) {
+	cfg := Default()
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	cfg.normalize()
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// Save записывает конфигурацию в файл (атомарно).
+func (c *Config) Save(path string) error {
+	c.normalize()
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// YAML возвращает сериализованную конфигурацию (для веб-интерфейса).
+func (c *Config) YAML() string {
+	c.normalize()
+	data, _ := yaml.Marshal(c)
+	return string(data)
+}
+
+func (c *Config) normalize() {
+	if c.Listen.UDP == "" {
+		c.Listen.UDP = ":53"
+	}
+	if c.Listen.TCP == "" {
+		c.Listen.TCP = ":53"
+	}
+	if c.Web.Listen == "" {
+		c.Web.Listen = ":8080"
+	}
+	if c.Cache.MaxEntries <= 0 {
+		c.Cache.MaxEntries = 10000
+	}
+	if c.Groups == nil {
+		c.Groups = map[string]Group{}
+	}
+	for name, g := range c.Groups {
+		g.Protocol = strings.ToLower(strings.TrimSpace(g.Protocol))
+		if g.Protocol == "" {
+			g.Protocol = "udp"
+		}
+		c.Groups[name] = g
+	}
+	if c.DefaultGroup == "" {
+		c.DefaultGroup = "default"
+	}
+}
+
+// Validate проверяет конфигурацию на согласованность.
+func (c *Config) Validate() error {
+	if len(c.Groups) == 0 {
+		return fmt.Errorf("no upstream groups configured")
+	}
+	if _, ok := c.Groups[c.DefaultGroup]; !ok {
+		return fmt.Errorf("default_group %q not found in groups", c.DefaultGroup)
+	}
+	for name, g := range c.Groups {
+		switch g.Protocol {
+		case "udp", "dot", "doh":
+		default:
+			return fmt.Errorf("group %q: unknown protocol %q (want udp|dot|doh)", name, g.Protocol)
+		}
+		if len(g.Primary) == 0 && len(g.Fallback) == 0 {
+			return fmt.Errorf("group %q: no upstream servers configured", name)
+		}
+	}
+	for i, r := range c.Rules {
+		if strings.TrimSpace(r.Zone) == "" {
+			return fmt.Errorf("rule %d: empty zone", i)
+		}
+		if _, ok := c.Groups[r.Group]; !ok {
+			return fmt.Errorf("rule %d (zone %q): group %q not found", i, r.Zone, r.Group)
+		}
+	}
+	if c.Cache.Enabled && c.Cache.MaxTTL > 0 && c.Cache.MinTTL > c.Cache.MaxTTL {
+		return fmt.Errorf("cache: min_ttl (%d) > max_ttl (%d)", c.Cache.MinTTL, c.Cache.MaxTTL)
+	}
+	return nil
+}

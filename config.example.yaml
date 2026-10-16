@@ -1,0 +1,39 @@
+# Пример конфигурации dns-guard.
+# Скопируйте в config.yaml и поправьте под себя.
+
+listen:
+  udp: ":53"
+  tcp: ":53"
+
+web:
+  enabled: true
+  listen: ":8080"
+
+cache:
+  enabled: true
+  max_entries: 10000
+  min_ttl: 60      # MIN-TTL: пол TTL ответа (секунды)
+  max_ttl: 0       # MAX-TTL: 0 = без верхней границы
+
+upstream:
+  timeout: 3s
+
+# Группы вышестоящих серверов. Протокол задаётся на группу: udp | dot | doh.
+# primary используется первым (с ротацией), fallback — только при ошибке запроса.
+groups:
+  a:                          # дефолтная группа — UDP
+    protocol: udp
+    primary:  ["77.88.8.8", "8.8.8.8"]
+    fallback: ["1.1.1.1"]
+  b:                          # зона .ru — DoH
+    protocol: doh
+    primary:  ["https://dns.google/dns-query"]
+    fallback: ["https://cloudflare-dns.com/dns-query"]
+    bootstrap: ["77.88.8.8"]  # plain-DNS для резолва хостнеймов DoH/DoT
+
+default_group: a
+
+# Маршрутизация по зонам (longest-suffix match).
+rules:
+  - zone: "ru"
+    group: b

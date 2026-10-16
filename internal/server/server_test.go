@@ -1,0 +1,246 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net"
+	"testing"
+	"time"
+
+	"github.com/miekg/dns"
+	"github.com/nskforward/dns-guard/internal/cache"
+	"github.com/nskforward/dns-guard/internal/config"
+	"github.com/nskforward/dns-guard/internal/rules"
+	"github.com/nskforward/dns-guard/internal/stats"
+)
+
+// fakeExchanger — подменная вышестоящая группа.
+type fakeExchanger struct {
+	resp  *dns.Msg
+	err   error
+	last  *dns.Msg
+	calls int
+}
+
+func (f *fakeExchanger) Exchange(_ context.Context, m *dns.Msg) (*dns.Msg, string, error) {
+	f.calls++
+	f.last = m
+	if f.err != nil {
+		return nil, "", f.err
+	}
+	return f.resp.Copy(), "fake", nil
+}
+
+func (f *fakeExchanger) Close() error { return nil }
+
+// mockWriter — ResponseWriter, сохраняющий записанный ответ.
+type mockWriter struct {
+	msg    *dns.Msg
+	remote net.Addr
+}
+
+func (m *mockWriter) LocalAddr() net.Addr         { return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53} }
+func (m *mockWriter) WriteMsg(msg *dns.Msg) error { m.msg = msg; return nil }
+func (m *mockWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (m *mockWriter) Close() error                { return nil }
+func (m *mockWriter) TsigStatus() error           { return nil }
+func (m *mockWriter) TsigTimersOnly(bool)         {}
+func (m *mockWriter) Hijack()                     {}
+
+func (m *mockWriter) RemoteAddr() net.Addr {
+	if m.remote != nil {
+		return m.remote
+	}
+	return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}
+}
+
+func query(name string, qtype uint16) *dns.Msg {
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(name), qtype)
+	return m
+}
+
+func aResponse(name string, ttl uint32) *dns.Msg {
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(name), dns.TypeA)
+	m.Response = true
+	rr, _ := dns.NewRR(name + ". 5 IN A 1.2.3.4")
+	rr.Header().Ttl = ttl
+	m.Answer = append(m.Answer, rr)
+	return m
+}
+
+func testState(fa, fb exchanger, minTTL uint32) *state {
+	return &state{
+		matcher:      rules.New([]config.Rule{{Zone: "ru", Group: "b"}}),
+		groups:       map[string]exchanger{"a": fa, "b": fb},
+		def:          fa,
+		defName:      "a",
+		timeout:      time.Second,
+		cacheEnabled: true,
+		minTTL:       minTTL,
+	}
+}
+
+func newTestServer(st *state, c *cache.Cache, ss *stats.Stats) *Server {
+	s := &Server{cache: c, stats: ss, log: slog.Default()}
+	s.st.Store(st)
+	return s
+}
+
+func TestServeDNSMissThenHit(t *testing.T) {
+	fa := &fakeExchanger{resp: aResponse("example.com", 300)}
+	c := cache.New(100, 60, 0)
+	ss := stats.New()
+	s := newTestServer(testState(fa, fa, 60), c, ss)
+
+	// Первый запрос — промах, идёт к апстриму.
+	w := &mockWriter{}
+	s.ServeDNS(w, query("example.com", dns.TypeA))
+	if w.msg == nil || w.msg.Rcode != dns.RcodeSuccess || len(w.msg.Answer) != 1 {
+		t.Fatalf("bad reply: %+v", w.msg)
+	}
+	if fa.calls != 1 {
+		t.Fatalf("calls = %d, want 1", fa.calls)
+	}
+	if !fa.last.RecursionDesired {
+		t.Fatalf("upstream query must have RD set")
+	}
+	if c.Len() != 1 {
+		t.Fatalf("cache len = %d, want 1", c.Len())
+	}
+
+	// Второй запрос — попадание в кэш, апстрим не вызывается.
+	w2 := &mockWriter{}
+	s.ServeDNS(w2, query("example.com", dns.TypeA))
+	if fa.calls != 1 {
+		t.Fatalf("cache miss on second query, calls = %d", fa.calls)
+	}
+	snap := ss.Snapshot(10)
+	if snap.CacheHits != 1 || snap.CacheMisses != 1 {
+		t.Fatalf("hits/misses = %d/%d", snap.CacheHits, snap.CacheMisses)
+	}
+}
+
+func TestServeDNSAppliesMinTTL(t *testing.T) {
+	fa := &fakeExchanger{resp: aResponse("example.com", 5)}
+	s := newTestServer(testState(fa, fa, 60), cache.New(100, 60, 0), stats.New())
+
+	w := &mockWriter{}
+	s.ServeDNS(w, query("example.com", dns.TypeA))
+	if got := w.msg.Answer[0].Header().Ttl; got != 60 {
+		t.Fatalf("ttl = %d, want 60", got)
+	}
+}
+
+func TestServeDNSRouting(t *testing.T) {
+	fa := &fakeExchanger{resp: aResponse("example.com", 300)}
+	fb := &fakeExchanger{resp: aResponse("example.ru", 300)}
+	s := newTestServer(testState(fa, fb, 60), cache.New(100, 60, 0), stats.New())
+
+	// Зона .ru -> группа b.
+	s.ServeDNS(&mockWriter{}, query("example.ru", dns.TypeA))
+	if fb.calls != 1 || fa.calls != 0 {
+		t.Fatalf("routing failed: a=%d b=%d", fa.calls, fb.calls)
+	}
+	// Всё остальное -> группа по умолчанию a.
+	s.ServeDNS(&mockWriter{}, query("example.com", dns.TypeA))
+	if fa.calls != 1 {
+		t.Fatalf("default routing failed: a=%d", fa.calls)
+	}
+}
+
+func TestServeDNSServfailOnUpstreamError(t *testing.T) {
+	fa := &fakeExchanger{err: errors.New("boom")}
+	ss := stats.New()
+	s := newTestServer(testState(fa, fa, 60), cache.New(100, 60, 0), ss)
+
+	w := &mockWriter{}
+	s.ServeDNS(w, query("example.com", dns.TypeA))
+	if w.msg.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("rcode = %d, want SERVFAIL", w.msg.Rcode)
+	}
+	if ss.Snapshot(1).Servfail != 1 {
+		t.Fatalf("servfail counter not incremented")
+	}
+}
+
+func TestServeDNSRestoresIDAndQuestion(t *testing.T) {
+	fa := &fakeExchanger{resp: aResponse("example.com", 300)}
+	fa.resp.Question = nil // апстрим не вернул вопрос
+	fa.resp.Id = 999
+	s := newTestServer(testState(fa, fa, 60), nil, stats.New())
+
+	q := query("example.com", dns.TypeA)
+	q.Id = 4242
+	w := &mockWriter{}
+	s.ServeDNS(w, q)
+	if w.msg.Id != 4242 {
+		t.Fatalf("id = %d, want 4242", w.msg.Id)
+	}
+	if len(w.msg.Question) != 1 || w.msg.Question[0].Name != "example.com." {
+		t.Fatalf("question not restored: %+v", w.msg.Question)
+	}
+}
+
+func TestServeDNSRefusedOnBadQuery(t *testing.T) {
+	fa := &fakeExchanger{resp: aResponse("example.com", 300)}
+	s := newTestServer(testState(fa, fa, 60), nil, stats.New())
+
+	m := new(dns.Msg)
+	m.Id = 1
+	m.Response = false
+	w := &mockWriter{}
+	s.ServeDNS(w, m) // нет вопроса
+	if w.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("rcode = %d, want REFUSED", w.msg.Rcode)
+	}
+	if fa.calls != 0 {
+		t.Fatalf("upstream called for bad query")
+	}
+}
+
+func TestTruncationUDPvsTCP(t *testing.T) {
+	resp := new(dns.Msg)
+	resp.SetQuestion("example.com.", dns.TypeA)
+	resp.Response = true
+	for i := 0; i < 100; i++ {
+		rr, _ := dns.NewRR("example.com. 300 IN A 10.0.0.1")
+		resp.Answer = append(resp.Answer, rr)
+	}
+	fa := &fakeExchanger{resp: resp}
+	s := newTestServer(testState(fa, fa, 0), cache.New(100, 0, 0), stats.New())
+
+	// UDP без EDNS: обрезаем до 512 с TC=1.
+	wu := &mockWriter{}
+	s.ServeDNS(wu, query("example.com", dns.TypeA))
+	if !wu.msg.Truncated {
+		t.Fatalf("UDP reply must be truncated")
+	}
+	packed, _ := wu.msg.Pack()
+	if len(packed) > dns.MinMsgSize {
+		t.Fatalf("UDP reply size = %d, want <= %d", len(packed), dns.MinMsgSize)
+	}
+
+	// TCP: без обрезки.
+	wt := &mockWriter{remote: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}}
+	s.ServeDNS(wt, query("example.com", dns.TypeA))
+	if wt.msg.Truncated || len(wt.msg.Answer) != 100 {
+		t.Fatalf("TCP reply truncated: tc=%v answers=%d", wt.msg.Truncated, len(wt.msg.Answer))
+	}
+}
+
+func TestReloadSwapsState(t *testing.T) {
+	fa := &fakeExchanger{resp: aResponse("example.com", 300)}
+	s := newTestServer(testState(fa, fa, 60), nil, stats.New())
+
+	old := s.st.Load()
+	cfg := config.Default()
+	if err := s.Reload(cfg); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if s.st.Load() == old {
+		t.Fatalf("state not swapped")
+	}
+}

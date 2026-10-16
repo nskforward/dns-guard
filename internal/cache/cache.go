@@ -1,0 +1,226 @@
+// Package cache реализует in-memory кэш DNS-ответов с ограничением TTL снизу
+// (MIN-TTL) и опционально сверху. Кэш сбрасывается при перезапуске сервиса.
+package cache
+
+import (
+	"container/list"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/miekg/dns"
+)
+
+type entry struct {
+	key     string
+	msg     *dns.Msg
+	stored  time.Time
+	expires time.Time
+	elem    *list.Element
+}
+
+// Cache — потокобезопасный LRU-кэш DNS-сообщений.
+type Cache struct {
+	mu      sync.Mutex
+	max     int
+	minTTL  uint32
+	maxTTL  uint32
+	now     func() time.Time
+	entries map[string]*entry
+	lru     *list.List
+}
+
+// New создаёт кэш. minTTL/maxTTL — границы TTL в секундах (maxTTL=0 — без верхней границы).
+func New(maxEntries int, minTTL, maxTTL uint32) *Cache {
+	return newWithClock(maxEntries, minTTL, maxTTL, time.Now)
+}
+
+func newWithClock(maxEntries int, minTTL, maxTTL uint32, now func() time.Time) *Cache {
+	if maxEntries <= 0 {
+		maxEntries = 10000
+	}
+	return &Cache{
+		max:     maxEntries,
+		minTTL:  minTTL,
+		maxTTL:  maxTTL,
+		now:     now,
+		entries: make(map[string]*entry),
+		lru:     list.New(),
+	}
+}
+
+// MinTTL возвращает настроенный минимальный TTL.
+func (c *Cache) MinTTL() uint32 { return c.minTTL }
+
+// key формирует ключ кэша по вопросу.
+func key(q dns.Question, do bool) string {
+	doBit := "0"
+	if do {
+		doBit = "1"
+	}
+	return fmt.Sprintf("%s|%d|%d|%s", strings.ToLower(q.Name), q.Qtype, q.Qclass, doBit)
+}
+
+// Get возвращает копию закэшированного ответа с уменьшенными TTL.
+func (c *Cache) Get(q dns.Question, do bool) (*dns.Msg, bool) {
+	k := key(q, do)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[k]
+	if !ok {
+		return nil, false
+	}
+	now := c.now()
+	if now.After(e.expires) {
+		c.removeElem(e)
+		return nil, false
+	}
+	c.lru.MoveToFront(e.elem)
+	out := e.msg.Copy()
+	elapsed := uint32(now.Sub(e.stored).Seconds())
+	decTTL(out, elapsed)
+	return out, true
+}
+
+// Put сохраняет ответ (предварительно применив границы TTL).
+func (c *Cache) Put(q dns.Question, m *dns.Msg) {
+	if m == nil || m.Truncated {
+		return
+	}
+	if m.Rcode != dns.RcodeSuccess && m.Rcode != dns.RcodeNameError {
+		return
+	}
+	if len(m.Question) == 0 {
+		return
+	}
+	c.Apply(m)
+	ttl := minTTLOf(m)
+	if ttl == 0 {
+		return
+	}
+	k := key(m.Question[0], hasDO(m))
+
+	stored := m.Copy()
+	now := c.now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if old, ok := c.entries[k]; ok {
+		c.removeElem(old)
+	}
+	e := &entry{
+		key:     k,
+		msg:     stored,
+		stored:  now,
+		expires: now.Add(time.Duration(ttl) * time.Second),
+	}
+	e.elem = c.lru.PushFront(e)
+	c.entries[k] = e
+	for c.lru.Len() > c.max {
+		if back := c.lru.Back(); back != nil {
+			c.removeElem(back.Value.(*entry))
+		}
+	}
+}
+
+// Apply применяет границы TTL (MIN-TTL / MAX-TTL) к секциям ответа.
+func (c *Cache) Apply(m *dns.Msg) {
+	applySection(m.Answer, c.minTTL, c.maxTTL)
+	applySection(m.Ns, c.minTTL, c.maxTTL)
+	applySection(m.Extra, c.minTTL, c.maxTTL)
+}
+
+// Flush очищает кэш.
+func (c *Cache) Flush() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = make(map[string]*entry)
+	c.lru.Init()
+}
+
+// Len возвращает число записей в кэше.
+func (c *Cache) Len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lru.Len()
+}
+
+func (c *Cache) removeElem(e *entry) {
+	if e == nil {
+		return
+	}
+	if e.elem != nil {
+		c.lru.Remove(e.elem)
+	}
+	delete(c.entries, e.key)
+}
+
+func applySection(rrs []dns.RR, minTTL, maxTTL uint32) {
+	for _, rr := range rrs {
+		if _, ok := rr.(*dns.OPT); ok {
+			continue
+		}
+		h := rr.Header()
+		if minTTL > 0 && h.Ttl < minTTL {
+			h.Ttl = minTTL
+		}
+		if maxTTL > 0 && h.Ttl > maxTTL {
+			h.Ttl = maxTTL
+		}
+	}
+}
+
+func decTTL(m *dns.Msg, elapsed uint32) {
+	for _, sec := range [][]dns.RR{m.Answer, m.Ns, m.Extra} {
+		for _, rr := range sec {
+			if _, ok := rr.(*dns.OPT); ok {
+				continue
+			}
+			h := rr.Header()
+			if h.Ttl > elapsed {
+				h.Ttl -= elapsed
+			} else {
+				h.Ttl = 0
+			}
+		}
+	}
+}
+
+// minTTLOf вычисляет TTL хранения: минимум по ответу, иначе по SOA в authority.
+func minTTLOf(m *dns.Msg) uint32 {
+	var ttl uint32
+	set := false
+	for _, rr := range m.Answer {
+		if _, ok := rr.(*dns.OPT); ok {
+			continue
+		}
+		t := rr.Header().Ttl
+		if !set || t < ttl {
+			ttl = t
+			set = true
+		}
+	}
+	if !set {
+		for _, rr := range m.Ns {
+			if soa, ok := rr.(*dns.SOA); ok {
+				t := soa.Minttl
+				if soa.Hdr.Ttl < t {
+					t = soa.Hdr.Ttl
+				}
+				if !set || t < ttl {
+					ttl = t
+					set = true
+				}
+			}
+		}
+	}
+	return ttl
+}
+
+// hasDO определяет, запрашивал ли клиент DNSSEC (DO-бит в OPT).
+func hasDO(m *dns.Msg) bool {
+	if opt := m.IsEdns0(); opt != nil {
+		return opt.Do()
+	}
+	return false
+}
