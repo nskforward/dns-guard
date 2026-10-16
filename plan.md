@@ -19,6 +19,15 @@ DNS-сервис для MikroTik RouterOS (ARM64 контейнер): прини
 - **SSH `192.168.88.1:22` теперь доступен** (в сессии 1 был `No route to host`) — deploy выполняется автономно, `admin` / `admin1` (пароль вводится через `expect`, т.к. `sshpass` не установлен). Также открыты 8728 (API) и 8291 (winbox).
 - **Критично (VPN-DNS-связка):** на роутере DNS управляет маршрутизацией в VPN: статические `FWD`-записи DNS с `address-list=to_vpn_list` наполняют список, mangle уводит эти IP в AmneziaWG. Поэтому резолвинг VPN-доменов обязан проходить через DNS роутера. Полное внедрение (внешние DoH) — по схеме **«роутер → контейнер»** (`/ip dns set servers=192.168.89.3`); в сессии 2 клиентов и `/ip dns` не трогаем (см. топологию ниже).
 
+### Находки сессии 2 (живой деплой)
+
+- **Внешний UDP/53 заблокирован провайдером.** Запросы контейнера на `8.8.8.8:53`, `77.88.8.8:53`, `192.168.1.1:53` уходят (видно сниффером, conntrack `REPL-PACKETS=0`), ответов нет. При этом WAN роутера исправен: `/ping 1.1.1.1` и `:resolve google.com` работают, `to_vpn_list` растёт. Вывод: **нужен DoH/DoT** — прямой UDP/53 к внешнему миру не проходит.
+- **Роутер не отвечает контейнеру на UDP/53** (запрос Mac → контейнер → роутер `192.168.88.1:53`/`192.168.89.1:53` виден, ответа нет; кэш роутера запрос контейнера не обрабатывает). Проверено: добавление input‑accept для `192.168.89.0/24` (счётчик срабатывает) и внесение бриджа `container` в список `LAN` **не помогло**. Похоже на отказ резолвера RouterOS отвечать контейнерной подсети. **Отсюда: план «cache-only, апстрим = роутер» нерабочий** — идём сразу на DoH.
+- **DoH/DoT работают из контейнера:** `https://9.9.9.9/dns-query` (Quad9) и `https://94.140.14.14/dns-query` (AdGuard) — стабильно `NOERROR`; DoT `1.1.1.1:853` — `NOERROR`; Cloudflare `1.1.1.1`/Google `8.8.8.8` DoH — нестабильны (часто `SERVFAIL`). Bootstrap недоступен (UDP/53), поэтому DoH-URL только по IP.
+- **MIN-TTL подтверждён:** у `example.com` апстрим отдаёт малый TTL, контейнер возвращает **3600**.
+- **«Пропажа сети» — это Mac, не роутер.** WAN (`ether1`) стабилен, DHCP‑аренда `192.168.1.11` не менялась. `/ping 192.168.1.1` в timeout — норма (ISP‑шлюз не отвечает на ICMP). А вот Wi‑Fi Mac (en0, `c0:c7:db:03:ff:18`) **роумится** между сетью роутера и сетью провайдера (то `192.168.88.251`, то `192.168.1.13`), аренда многократно deassign/assign — отсюда `No route to host`. Плюс на `ether5` флапает линк (100M‑устройство).
+- В 14:59 через WebFig с Mac применялся `/ip dns set ...` — в частности очищен `mdns-repeat-ifaces` (был `awg`). Стоит уточнить, намеренно ли.
+
 ## Решения (согласованы)
 
 | Вопрос | Решение |
@@ -31,7 +40,9 @@ DNS-сервис для MikroTik RouterOS (ARM64 контейнер): прини
 | Статистика | Сброс при рестарте, top-100 по числу запросов + пиковый RPM на домен |
 | Кэш | In-memory, сброс при рестарте, MIN-TTL пол |
 | Кэш сервиса на деплое (сессия 2) | **Выключен** (`cache.enabled: false`), код кэша сохраняется как опция. Роль кэша исполняет кэш RouterOS; MIN-TTL применяется к ответам независимо от кэша |
-| Топология сессии 2 | **Cache-only, без переключения клиентов.** Апстрим контейнера = DNS роутера (`192.168.88.1`); DHCP-DNS и `/ip dns` **не меняем** — петля исключена, `to_vpn_list` наполняется |
+| Топология сессии 2 | **Cache-only, без переключения клиентов.** Но апстрим = **DoH наружу** (не роутер): внешний UDP/53 провайдер блокирует, а роутер не отвечает контейнеру на UDP/53 (см. находки). DHCP-DNS и `/ip dns` **не меняем** — петля невозможна, контейнер ходит напрямую в DoH |
+| Апстримы (сессия 2) | **DoH по IP** (хостнеймы без bootstrap не резолвятся): primary `9.9.9.9` (Quad9) + `94.140.14.14` (AdGuard), fallback `1.1.1.1`. DoT `1.1.1.1:853` тоже работает |
+| Топология полной фазы | **Открытый вопрос** из-за `to_vpn_list`: контейнер с внешним DoH не проходит через резолвер роутера, значит не наполняет `to_vpn_list`. Варианты — «роутер → контейнер» (список наполняют статические FWD роутера) либо зональные правила для VPN-доменов через резолвер роутера |
 | Сборка/публикация образа | **GitHub Actions** (buildx, `linux/arm64`) → Docker Hub `nskforward/dns-guard`; локальный Docker-демон не требуется |
 
 ## Архитектура
@@ -206,45 +217,49 @@ rules:
 
 - [x] `.github/workflows/docker.yml`: триггеры `push` в `main` + `workflow_dispatch`; `docker/setup-buildx-action` (+ QEMU), `docker/build-push-action` с `platforms: linux/arm64`, `push: true`; теги `latest` и `sha-<short>`; кэш слоёв через `type=gha`; логин по секретам **`DOCKER_USERNAME` / `DOCKER_PASSWORD`**.
 - [x] Первичный коммит проекта и `git push -u origin main` (коммит `f8b975e`).
-- [ ] **Блокер:** ран `38893687113` падает на шаге **Log in to Docker Hub** (следующие шаги пропущены). Нужно проверить секреты: `DOCKER_USERNAME` = аккаунт Docker Hub, `DOCKER_PASSWORD` = **access token** (не пароль аккаунта; парольная аутентификация на Docker Hub отключена). Также убедиться, что секреты заданы на уровне репозитория (не только organization/environment).
-- [ ] Перезапустить ран после исправления секретов.
-- [ ] Проверить, что репозиторий Docker Hub **публичный** (роутер тянет анонимно): `curl https://hub.docker.com/v2/repositories/nskforward/dns-guard/`. Фолбэк при приватном — прописать creds в `/container/config` роутера.
+- [x] **Блокер снят:** первый ран `38893687113` упал на шаге **Log in to Docker Hub** — в репозитории `dns-guard` не было секретов (они были только у `mikwg`). Добавлены `DOCKER_USERNAME`/`DOCKER_PASSWORD`; ран `da3a934` и последующие — `success`.
+- [x] Репозиторий Docker Hub **публичный** (`curl https://hub.docker.com/v2/repositories/nskforward/dns-guard/` → 200, тег `latest`, `linux/arm64`).
 
 ### Этап 2.2. Деплой на роутер (SSH `admin@192.168.88.1`, через `expect`)
 
-- [ ] `veth-dnsguard 192.168.89.3/24 gateway=192.168.89.1` + `/interface bridge port add bridge=container interface=veth-dnsguard`.
-- [ ] Конфиг залить по SFTP в `/usb1/dns-guard/conf/config.yaml`:
+- [x] `veth-dnsguard 192.168.89.3/24 gateway=192.168.89.1` + `/interface bridge port add bridge=container interface=veth-dnsguard`.
+- [x] Конфиг залит по SFTP в `/usb1/dns-guard/conf/config.yaml` (актуальный — DoH, см. ниже):
   ```yaml
   listen:  {udp: ":53", tcp: ":53"}
   web:     {enabled: true, listen: ":8080"}
   cache:   {enabled: false, max_entries: 10000, min_ttl: 3600, max_ttl: 0}
   upstream:{timeout: 3s}
   groups:
-    a: {protocol: udp, primary: ["192.168.88.1"]}
+    a: {protocol: doh, primary: ["https://9.9.9.9/dns-query", "https://94.140.14.14/dns-query"], fallback: ["https://1.1.1.1/dns-query"]}
   default_group: a
   rules: []
   ```
-- [ ] `/container/mounts add list=dns-guard-conf src=/usb1/dns-guard/conf dst=/etc/dns-guard mode=rw` (у `mounts` список задаётся через `list=`; у контейнера свойство — `mountlists=`).
-- [ ] `/container/add remote-image=nskforward/dns-guard:latest interface=veth-dnsguard mountlists=dns-guard-conf root-dir=/usb1/images/dns-guard dns=192.168.88.1 start-on-boot=yes logging=yes` → `/container/start` (у add нет параметров `os`/`arch` — определяются автоматически).
-- [ ] Диагностика: `/container print`, `/log print where topics~"container"`.
+  (апстрим — DoH по IP; UDP/53 наружу блокируется. Актуальный файл — в `tmp/router-config.yaml` и в `/usb1/dns-guard/conf/config.yaml`.)
+- [x] `/container/mounts add list=dns-guard-conf src=/usb1/dns-guard/conf dst=/etc/dns-guard mode=rw` (у `mounts` список задаётся через `list=`; у контейнера свойство — `mountlists=`).
+- [x] `/container/add remote-image=nskforward/dns-guard:latest interface=veth-dnsguard mountlists=dns-guard-conf root-dir=/usb1/images/dns-guard dns=192.168.88.1 start-on-boot=yes logging=yes` → запущен (у add нет параметров `os`/`arch` — определяются автоматически).
+- [x] Диагностика: `/container print`, `/log print where topics~"container"`.
 
 ### Этап 2.3. Приёмка
 
-- [ ] `dig @192.168.89.3 <домен>` (UDP) и `+tcp` — ответы есть.
-- [ ] MIN-TTL: сравнить TTL у роутера (`@192.168.88.1`, мелкий TTL) и у контейнера → **≥ 3600**.
-- [ ] `curl http://192.168.89.3:8080/api/stats` — `total` растёт, домены в top-100 видны (`cache_len=0` — ожидаемо, кэш выключен).
-- [ ] `to_vpn_list`: `count-only` было 23 → растёт после резолва доменов из FWD-списка.
-- [ ] RAM: `/container print` memory-current (~10–15 MiB ожидаемо).
-- [ ] `PUT /api/config` → hot-reload без рестарта.
+- [x] `dig @192.168.89.3 <домен>` (UDP) — ответы есть (`NOERROR`, через DoH).
+- [x] MIN-TTL: апстрим отдаёт малый TTL → контейнер возвращает **3600**.
+- [x] `curl http://192.168.89.3:8080/api/stats` — `total` растёт, top-100/группы видны (`cache_len=0` — ожидаемо, кэш выключен).
+- [ ] `dig` TCP от клиента (без `+tcp` не проверяли отдельно; сервер слушает TCP/53).
+- [ ] RAM: `/container print` memory-current — контролировать в динамике.
+- [x] `PUT /api/config` → hot-reload без рестарта (использован многократно).
+- [ ] `to_vpn_list` — наполняется роутером от клиентских запросов (26+ записей); отдельная проверка после выбора топологии.
 - [ ] **Откат:** `/container stop` + `/container remove` + veth + mount. Клиенты и `/ip dns` не затронуты.
 
 ### Прогресс сессии 2 (хроника)
 
-- SSH к роутеру заработал (сеть Mac периодически флапает между LAN роутера и сетью провайдера — на деплой не влияет, т.к. нужен только LAN).
-- Каталог `usb1/volumes/` отсутствует; конфиг размещён в **`/usb1/dns-guard/conf/config.yaml`** (694 байта, загружен по SFTP).
-- Создано: `veth-dnsguard 192.168.89.3/24` + порт в бридж `container`; mount `list=dns-guard-conf src=/usb1/dns-guard/conf dst=/etc/dns-guard mode=rw`.
-- Контейнер `dns-guard` добавлен (`remote-image=nskforward/dns-guard:latest`, `mountlists=dns-guard-conf`, `root-dir=/usb1/images/dns-guard`, `dns=192.168.88.1`, `start-on-boot=yes`, `logging=yes`).
-- **Блокер:** образ не скачивается — `fetch manifest failed ... auth error`; репозиторий `nskforward/dns-guard` на Docker Hub пока не существует (проверено через `hub.docker.com API` → 404). Причина — ран CI упал на логине в Docker Hub (см. этап 2.1).
+- SSH к роутеру работает (Mac периодически теряет LAN из-за роуминга Wi‑Fi — на деплой не влияет).
+- Каталог `usb1/volumes/` отсутствует; конфиг размещён в **`/usb1/dns-guard/conf/config.yaml`**.
+- Создано: `veth-dnsguard 192.168.89.3/24 gateway=192.168.89.1` + порт в бридж `container`; mount `list=dns-guard-conf src=/usb1/dns-guard/conf dst=/etc/dns-guard mode=rw`.
+- Образ собран и опубликован: **`nskforward/dns-guard:latest`** (linux/arm64, публичный) через GitHub Actions. Секреты `DOCKER_USERNAME`/`DOCKER_PASSWORD` добавлены в репозиторий — первый ран падал на логине. Пуш образа на роутер сначала падал по `resolving error`/`timeout connecting` (флап апстрима), со второй попытки зашёл.
+- Исправлен баг: `config.Load/Parse` домешивал дефолтную группу к группам из YAML (`groups=2`) — коммит `6f4a6b3`, деплой подтвердил `groups=1`.
+- Контейнер `dns-guard` добавлен (`remote-image=nskforward/dns-guard:latest`, `mountlists=dns-guard-conf`, `root-dir=/usb1/images/dns-guard`, `dns=192.168.88.1`, `start-on-boot=yes`, `logging=yes`) и запущен. Слушает UDP/TCP 53 и 8080.
+- **Апстрим переопределён на DoH** (см. «Находки»): план «cache-only с апстримом = роутер» нереален — роутер не отвечает контейнеру на UDP/53, а внешний UDP/53 блокируется. Контейнер работает через DoH (Quad9/AdGuard), TTL 3600.
+- Временные правки firewall (input‑accept для контейнера, членство `container` в `LAN`) **откачены** — не потребовались.
 
 ## Состояние на начало сессии 2
 
