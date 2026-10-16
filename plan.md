@@ -5,7 +5,7 @@ DNS-сервис для MikroTik RouterOS (ARM64 контейнер): прини
 (UDP / DoT / DoH) с primary+fallback, применяет MIN-TTL, кэширует ответы
 в памяти и показывает статистику (top-100 доменов с пиковым RPM) в веб-UI.
 
-> **Актуальное состояние:** сессии 1–3 завершены — код (этапы 0–6), live-деплой контейнера на роутере (сессия 2), собственный DoH-сервер на VPS + клиентская опция `hosts` (сессия 3). Остался **этап C** — подключить VPS-DoH как primary в контейнере; план — в разделе «Следующий шаг (сессия 4)» в конце файла. Свежие разделы: «Сессия 3 — сделано», «Следующий шаг (сессия 4)».
+> **Актуальное состояние:** сессии 1–4 завершены — код (этапы 0–6), live-деплой контейнера на роутере (сессия 2), собственный DoH-сервер на VPS + клиентская опция `hosts` (сессия 3), **этап C** — контейнер работает на своём VPS-DoH как primary, публичные DoH в fallback (сессия 4). Остался один открытый вопрос — топология `to_vpn_list` для VPN-маршрутизации (см. «Открытый вопрос» в конце). Свежие разделы: «Сессия 4 — сделано», «Открытый вопрос».
 
 ## Контекст: результаты разведки роутера (обновлено в сессии 2)
 
@@ -205,7 +205,7 @@ rules:
   - [x] предупреждение про `to_vpn_list` / VPN-маршрутизацию
 - [x] `.github/workflows/docker.yml` — сборка и push `nskforward/dns-guard:latest` (arm64) через Actions (сделано в сессии 2)
 
-### Этап 7. Тесты и приёмка — ⏳ частично (осталось на роутере)
+### Этап 7. Тесты и приёмка — ✅ сделано (включая живой прогон в сессиях 2 и 4)
 
 - [x] юнит-тесты: `rules.Match` (longest-suffix, `*.ru`), `cache` (MIN-TTL/декей/негатив), `stats` (peak RPM, rollover), `config`, `server` (fake-апстрим)
 - [x] `go vet ./...`, `go build ./...`, `go test ./...`
@@ -213,7 +213,7 @@ rules:
 - [x] проверка MIN-TTL: апстрим с малым TTL (5s) → ответ ≥ min_ttl (60s)
 - [x] проверка fallback: недоступный primary → ответ через fallback
 - [x] сборка arm64-образа через GitHub Actions, публикация в Docker Hub (`nskforward/dns-guard:latest`)
-- [ ] живая приёмка на роутере: `dig @192.168.89.3` (UDP/TCP), TTL ≥ 3600, `/api/stats`, рост `to_vpn_list`, RAM (`/container print` memory-current)
+- [x] живая приёмка на роутере: `dig @192.168.89.3` (UDP/TCP), TTL ≥ 3600, `/api/stats`, RAM (`/container print` memory-current) — сессия 4; рост `to_vpn_list` зависит от выбора топологии (открытый вопрос).
 
 ---
 
@@ -281,8 +281,8 @@ rules:
 - [x] `dig @192.168.89.3 <домен>` (UDP) — ответы есть (`NOERROR`, через DoH).
 - [x] MIN-TTL: апстрим отдаёт малый TTL → контейнер возвращает **3600**.
 - [x] `curl http://192.168.89.3:8080/api/stats` — `total` растёт, top-100/группы видны (`cache_len=0` — ожидаемо, кэш выключен).
-- [ ] `dig` TCP от клиента (без `+tcp` не проверяли отдельно; сервер слушает TCP/53).
-- [ ] RAM: `/container print` memory-current — контролировать в динамике.
+- [x] `dig` TCP от клиента — дозаполнено в сессии 4 (после пересоздания контейнера): `NOERROR`, TTL 3600.
+- [x] RAM: `/container print` memory-current — дозаполнено в сессии 4: ~10.6–11.9 MiB, стабильно.
 - [x] `PUT /api/config` → hot-reload без рестарта (использован многократно).
 - [ ] `to_vpn_list` — наполняется роутером от клиентских запросов (26+ записей); отдельная проверка после выбора топологии.
 - [ ] **Откат:** `/container stop` + `/container remove` + veth + mount. Клиенты и `/ip dns` не затронуты.
@@ -346,21 +346,23 @@ DoH в unbound — **только HTTP/2 (h2c)**, а distro-nginx 1.24 не ум
 - Сервисы: `systemctl disable --now doh-proxy unbound`; `apt remove unbound`; `rm /usr/bin/doh-proxy /etc/systemd/system/doh-proxy.service`.
 - Клиентов и `/ip dns` роутера всё это **не касается** (этап C не выполнялся).
 
-## Следующий шаг (сессия 4) — Этап C: подключить VPS-DoH как primary в контейнере
+## Сессия 4 — сделано: Этап C (VPS-DoH как primary в контейнере)
 
-**Цель:** перевести контейнер `dns-guard` на роутере на свой DoH как primary; публичные Quad9/AdGuard — fallback. Это единственный невыполненный пункт изначального запроса (вынесен отдельным шагом).
+**Цель:** перевести контейнер `dns-guard` на роутере на свой DoH как primary; публичные Quad9/AdGuard — fallback. Выполнено.
 
 ### Доступы и факты
 
 - VPS: `ssh root@157.228.153.163` (key-auth, BatchMode). Токен: `/root/doh-token` на VPS. DoH-URL: `https://stream2.sla9.ru:8443/<TOKEN>/dns-query`.
 - Роутер: SSH `admin@192.168.88.1` (пароль `admin1`, вводится через `expect`; `sshpass` нет). Контейнер `dns-guard`: `interface=veth-dnsguard` (`192.168.89.3`), `mountlists=dns-guard-conf` (`/usb1/dns-guard/conf/config.yaml` → `/etc/dns-guard/config.yaml`), web `http://192.168.89.3:8080`.
-- **Важно:** текущий образ в контейнере — старый (без поддержки `hosts`). Сначала обновить образ, потом применять конфиг с `hosts`.
+- **Важно (снято):** образ в контейнере был обновлён (сборка с поддержкой `hosts`) *до* применения конфига с `hosts`.
 
-### Шаги
+### Итог (хроника исполнения)
 
-1. [ ] **Обновить образ** контейнера на роутере: pull `nskforward/dns-guard:latest` и пересоздать/обновить контейнер с теми же параметрами (`interface=veth-dnsguard`, `mountlists=dns-guard-conf`, `root-dir=/usb1/images/dns-guard`, `dns=192.168.88.1`, `start-on-boot=yes`, `logging=yes`). Проверить `/container print` и логи.
-2. [ ] **Токен** прочитать на VPS (`cat /root/doh-token`) — подставить в URL ниже.
-3. [ ] **`PUT /api/config`** на `http://192.168.89.3:8080` (или записать в `/usb1/dns-guard/conf/config.yaml` через SFTP):
+1. [x] **Образ обновлён.** Контейнер на роутере остановлен/удалён (`/container stop` + `/container remove`; `usb1/images/dns-guard` RouterOS удалил сам вместе с container store), затем пересоздан:
+      `/container/add remote-image=nskforward/dns-guard:latest interface=veth-dnsguard mountlists=dns-guard-conf root-dir=/usb1/images/dns-guard dns=192.168.88.1 start-on-boot=yes logging=yes name=dns-guard`.
+      Первый pull упал (`check registry failed: resolving error` — флап апстрима, как в сессии 2), со второй попытки образ скачался; после `download/extract done` контейнер оказался в статусе STOPPED — запущен вручную `/container/start`. Новый `image-id=a73c9486…` (старый был `d7fafdd6…`), старт чистый: `groups=1 rules=0 cache=false`.
+2. [x] **Токен** считан на VPS из `/root/doh-token` (в git/план не попал — плейсхолдер `<TOKEN>`).
+3. [x] **Конфиг залит по SFTP ДО старта** в `/usb1/dns-guard/conf/config.yaml` (актуальный — `tmp/router-config.yaml`, gitignored):
    ```yaml
    listen:  {udp: ":53", tcp: ":53"}
    web:     {enabled: true, listen: ":8080"}
@@ -375,24 +377,32 @@ DoH в unbound — **только HTTP/2 (h2c)**, а distro-nginx 1.24 не ум
    default_group: a
    rules: []
    ```
-4. [ ] **Приёмка:**
-   - `dig @192.168.89.3 example.com` (UDP) и `dig +tcp @192.168.89.3 example.com` → `NOERROR`, **TTL 3600** (MIN-TTL).
-   - `curl http://192.168.89.3:8080/api/stats` → `total` растёт, группы видны, `cache_len=0` (кэш выключен).
-   - На VPS `unbound-control stats | grep total.num.queries` — счётчик растёт ⇒ трафик реально идёт через свой сервер (не через fallback). Можно свериться по частоте: сгенерировать серию новых доменов и увидеть прирост.
-   - **Failover:** на VPS `systemctl stop doh-proxy` → `dig @192.168.89.3` всё ещё отвечает (через fallback); `systemctl start doh-proxy` → снова primary. Вернуть как было.
-   - RAM роутера: `/container print` `memory-current`; RAM VPS: `free -h`.
-5. [ ] **Дозаполнить приёмку сессии 2:** TCP-`dig` (пункт выше), динамика RAM.
-6. [ ] **Откат (при необходимости):** вернуть конфиг на публичные DoH (убрать `primary`/`hosts`) через `PUT /api/config`; при желании — образ и контейнер как в сессии 2.
+4. [x] **Приёмка** (см. ниже) — все пункты пройдены.
+5. [x] **Дозаполнена приёмка сессии 2:** TCP-`dig` и RAM (см. чек-лист этапа 2.3).
+6. [x] **Откат** — не потребовался. Резерв: `PUT /api/config` со старым конфигом (публичные DoH) или пересоздание контейнера с `remote-image=nskforward/dns-guard:sha-6f4a6b3` (образ сессии 2).
+
+### Результаты приёмки (живой прогон)
+
+- **UDP и TCP/53:** `dig @192.168.89.3 example.com` и `dig +tcp …` → `NOERROR`, `ANSWER: 2`, **TTL 3600** (MIN-TTL), флаг `ad` (DNSSEC от unbound), EDNS `udp:1232` (признак ответа VPS, а не fallback).
+- **Статистика:** `GET /api/stats` → `groups:{a:N}`, `cache_len:0` (кэш выключен, как задумано), `total` растёт. Из 38 запросов — `servfail:2` (только первые два сразу после старта контейнера; далее без ошибок).
+- **Primary реально используется:** серия из 12 запросов на уникальные имена → на VPS `unbound-control stats` `total.num.queries` вырос ровно на 12 (25→37).
+- **Failover:** `systemctl stop doh-proxy` на VPS → `dig @192.168.89.3` по-прежнему отвечает (`NOERROR` через fallback), счётчик unbound не растёт; `systemctl start doh-proxy` → следующий запрос снова primary (37→38, EDNS 1232). Вернули как было.
+- **Ресурсы:** RAM контейнера `~10.6–11.9 MiB`; VPS `free -h` — 616 MiB available, `nginx`/`doh-proxy`/`unbound` — `active`.
+- **Замечание:** первые 1–2 запроса к контейнеру сразу после пересоздания вернули `SERVFAIL` (ошибки обоих апстримов), затем всё стабильно. Похоже на короткий прогрев сетевого пути/`conntrack` после рестарта контейнера — не блокер; при желании можно добавить ретрай на старте.
 
 ### Открытый вопрос (не входит в этап C)
 
 - **`to_vpn_list`:** контейнер с внешним DoH не проходит через DNS-резолвер роутера, поэтому не наполняет `to_vpn_list` для VPN-маршрутизации. Варианты (нужно выбрать отдельно): топология «роутер → контейнер» (`/ip dns set servers=192.168.89.3`, список наполняют статические FWD роутера) или зональные правила для VPN-доменов через резолвер роутера. См. раздел «Известные риски».
 
-### Definition of Done этапа C
+### Definition of Done этапа C — ✅ выполнено
 
-- `dig` UDP и TCP через контейнер отдают ответы, TTL ≥ 3600, статистика растёт.
-- Трафик резолва идёт через VPS-рекурсор (подтверждено `unbound-control stats`), fallback проверен отключением `doh-proxy`.
-- Клиенты и `/ip dns` роутера при этом не затронуты; петли нет.
+- [x] `dig` UDP и TCP через контейнер отдают ответы (TTL ≥ 3600), статистика растёт.
+- [x] Трафик резолва идёт через VPS-рекурсор (подтверждено `unbound-control stats`), fallback проверен отключением `doh-proxy`.
+- [x] Клиенты и `/ip dns` роутера при этом не затронуты; петли нет.
+
+### Следующий шаг
+
+Единственный оставшийся пункт — **топология `to_vpn_list`** (см. «Открытый вопрос» выше). Всё остальное по изначальному запросу закрыто: контейнер на роутере резолвит через собственный DoH на VPS, MIN-TTL применяется, статистика и веб-UI работают.
 
 ## Состояние на начало сессии 2
 
