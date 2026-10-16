@@ -103,22 +103,22 @@ func Load(path string) (*Config, error) {
 		}
 		return nil, err
 	}
-	cfg := Default()
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
-	}
-	cfg.normalize()
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
-	return cfg, nil
+	return Parse(data)
 }
 
 // Parse разбирает и валидирует конфигурацию из байт.
 func Parse(data []byte) (*Config, error) {
 	cfg := Default()
+	// Карта групп должна задаваться YAML целиком: иначе yaml.Unmarshal
+	// домешивает группы к дефолтным (merge), и в конфиге появляется лишняя
+	// дефолтная группа. Сбрасываем перед разбором и восстанавливаем,
+	// только если в YAML группы не заданы вовсе.
+	cfg.Groups = nil
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if len(cfg.Groups) == 0 {
+		cfg.Groups = Default().Groups
 	}
 	cfg.normalize()
 	if err := cfg.Validate(); err != nil {

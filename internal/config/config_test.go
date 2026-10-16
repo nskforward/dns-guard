@@ -29,6 +29,28 @@ default_group: g1
 	}
 }
 
+func TestParseGroupsNotMerged(t *testing.T) {
+	cfg, err := Parse([]byte(`
+groups:
+  a:
+    protocol: udp
+    primary: ["192.168.1.1"]
+default_group: a
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(cfg.Groups) != 1 {
+		t.Fatalf("groups = %d (%v), want 1 (дефолтные группы не должны домешиваться)", len(cfg.Groups), cfg.Groups)
+	}
+	if _, ok := cfg.Groups["default"]; ok {
+		t.Fatalf("unexpected merged default group: %v", cfg.Groups)
+	}
+	if _, ok := cfg.Groups["a"]; !ok {
+		t.Fatalf("group a missing: %v", cfg.Groups)
+	}
+}
+
 func TestParseErrors(t *testing.T) {
 	cases := map[string]string{
 		"unknown protocol": `
