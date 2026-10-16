@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1
 
 # --- Сборка ---
-FROM golang:1.26-alpine AS build
+# Билд-стадия выполняется на нативной платформе раннера (amd64), а целевой
+# бинарь собирается кросс-компиляцией через GOARCH — без QEMU-эмуляции.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 WORKDIR /src
 
 COPY go.mod go.sum ./

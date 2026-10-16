@@ -5,15 +5,19 @@ DNS-сервис для MikroTik RouterOS (ARM64 контейнер): прини
 (UDP / DoT / DoH) с primary+fallback, применяет MIN-TTL, кэширует ответы
 в памяти и показывает статистику (top-100 доменов с пиковым RPM) в веб-UI.
 
-## Контекст: результаты разведки роутера
+## Контекст: результаты разведки роутера (обновлено в сессии 2)
 
-- **hAP ax³**, RouterOS **7.24.5** (stable), ARM64, 4×864 МГц, 1 ГБ RAM (~635 МБ свободно).
+- **hAP ax³**, RouterOS **7.24.5** (stable), ARM64, 4×864 МГц, 1 ГБ RAM (~638 МБ свободно), uptime на момент аудита 35 мин.
 - Пакет `container` установлен, **device-mode container=yes** уже включён.
-- Registry `https://registry-1.docker.io` настроен, tmpdir на USB.
-- USB: SanDisk Extreme 62.7 ГБ ext4 (свободно 61.4 ГБ). Внутренняя флеш 128 МБ, **8.5% бэд-блоков** — использовать только внешний диск.
-- Уже работает контейнер `nskforward/mikwg:latest` (arm64) — инфраструктура обкатана.
-- Контейнерный бридж `container` = **192.168.89.1/24**, маскарад `192.168.89.0/24` уже есть.
-- **Критично:** на роутере DNS управляет маршрутизацией в VPN: статические `FWD`-записи DNS с `address-list=to_vpn_list` наполняют список, mangle уводит эти IP в AmneziaWG. Поэтому внедрение — по схеме **«роутер → контейнер»** (`/ip dns set servers=192.168.89.3`), а не «клиенты → контейнер». Иначе `to_vpn_list` перестанет наполняться.
+- Registry `https://registry-1.docker.io` настроен, **username пустой** (анонимный pull публичных образов), tmpdir `/usb1/container-tmp`.
+- USB: SanDisk Extreme (SLOT `usb1`, смонтирован). Внутренняя флеш 128 МБ, **8.5% бэд-блоков**, free-hdd всего 77.9 MiB — использовать только внешний диск (`root-dir=/usb1/images/...`).
+- Работает контейнер **`awg-converter`** (`remote-image=nskforward/mikwg:latest`, os=linux arch=arm64, `interface=veth-awg`, `root-dir=/usb1/images/awg-converter`, `dns=1.1.1.1`, `start-on-boot=yes`, memory-current ~12 MiB). Инфраструктура контейнеров обкатана; namespace аккаунта — **`nskforward`**.
+- **veth:** `veth-awg 10.99.0.2/30` (для awg-converter), `vless 192.168.89.2/24 gateway=192.168.89.1` (порт в бридже `container`, флаг I — inactive). Шаблон для нас: `veth-dnsguard 192.168.89.3/24 gateway=192.168.89.1` + порт в бридж `container`.
+- Контейнерный бридж `container` = **192.168.89.1/24**. Firewall forward **не блокирует** LAN→container (есть `fasttrack` + `drop all from WAN`, это не мешает routed-трафику из бриджа).
+- `/ip dns`: `servers:` пусто, `dynamic-servers=192.168.1.1` (от DHCP на ether1), `use-doh-server:` пусто, `allow-remote-requests=yes`, `cache-size=2048KiB`, **`cache-max-ttl=1w`**, cache-used 319KiB. DHCP раздаёт клиентам `dns-server=192.168.88.1`.
+- `/ip dns static` — 69 записей; `to_vpn_list` на момент аудита = **23** (база для замера).
+- **SSH `192.168.88.1:22` теперь доступен** (в сессии 1 был `No route to host`) — deploy выполняется автономно, `admin` / `admin1` (пароль вводится через `expect`, т.к. `sshpass` не установлен). Также открыты 8728 (API) и 8291 (winbox).
+- **Критично (VPN-DNS-связка):** на роутере DNS управляет маршрутизацией в VPN: статические `FWD`-записи DNS с `address-list=to_vpn_list` наполняют список, mangle уводит эти IP в AmneziaWG. Поэтому резолвинг VPN-доменов обязан проходить через DNS роутера. Полное внедрение (внешние DoH) — по схеме **«роутер → контейнер»** (`/ip dns set servers=192.168.89.3`); в сессии 2 клиентов и `/ip dns` не трогаем (см. топологию ниже).
 
 ## Решения (согласованы)
 
@@ -26,6 +30,9 @@ DNS-сервис для MikroTik RouterOS (ARM64 контейнер): прини
 | Web UI | **Без авторизации** (LAN) |
 | Статистика | Сброс при рестарте, top-100 по числу запросов + пиковый RPM на домен |
 | Кэш | In-memory, сброс при рестарте, MIN-TTL пол |
+| Кэш сервиса на деплое (сессия 2) | **Выключен** (`cache.enabled: false`), код кэша сохраняется как опция. Роль кэша исполняет кэш RouterOS; MIN-TTL применяется к ответам независимо от кэша |
+| Топология сессии 2 | **Cache-only, без переключения клиентов.** Апстрим контейнера = DNS роутера (`192.168.88.1`); DHCP-DNS и `/ip dns` **не меняем** — петля исключена, `to_vpn_list` наполняется |
+| Сборка/публикация образа | **GitHub Actions** (buildx, `linux/arm64`) → Docker Hub `nskforward/dns-guard`; локальный Docker-демон не требуется |
 
 ## Архитектура
 
@@ -38,6 +45,8 @@ DNS-сервис для MikroTik RouterOS (ARM64 контейнер): прини
    4. Apply MIN-TTL/MAX-TTL ко всем секциям
    5. cache.Put, stats.Record -> ответ клиенту
 ```
+
+Важно: шаг 4 (`applyTTL`) выполняется **независимо от кэша** (`server.go:156`), а `minTTL` берётся из `cfg.Cache.MinTTL` даже при `cache.enabled: false` (`server.go:98`). Поэтому сервис работает и как «TTL-реврайтер» перед кэшем роутера.
 
 Слои:
 
@@ -149,6 +158,7 @@ rules:
   - [x] `/container/add remote-image=... arm64`
   - [x] переключение `/ip dns set use-doh-server="" servers=192.168.89.3` (+ откат)
   - [x] предупреждение про `to_vpn_list` / VPN-маршрутизацию
+- [ ] `.github/workflows/docker.yml` — сборка и push `nskforward/dns-guard:latest` (arm64) через Actions
 
 ### Этап 7. Тесты и приёмка — ⏳ частично (осталось на роутере)
 
@@ -157,8 +167,8 @@ rules:
 - [x] локальный smoke: конфиг + `dig @127.0.0.1` по UDP и TCP
 - [x] проверка MIN-TTL: апстрим с малым TTL (5s) → ответ ≥ min_ttl (60s)
 - [x] проверка fallback: недоступный primary → ответ через fallback
-- [ ] сборка arm64-образа, загрузка на роутер, `dig @192.168.88.1 youtube.com` → рост `to_vpn_list`
-- [ ] контроль RAM (`/container print` memory-current)
+- [ ] сборка arm64-образа через GitHub Actions, публикация в Docker Hub и загрузка на роутер
+- [ ] живая приёмка на роутере: `dig @192.168.89.3` (UDP/TCP), TTL ≥ 3600, `/api/stats`, рост `to_vpn_list`, RAM (`/container print` memory-current)
 
 ---
 
@@ -166,7 +176,7 @@ rules:
 
 1. **VPN-DNS-связка** — точку внедрения выбирать так, чтобы запросы всё равно проходили через DNS роутера (он наполняет `to_vpn_list`). В режиме «только кэш» апстрим контейнера = DNS роутера, поэтому `/ip dns servers` роутера на контейнер НЕ переключаем (иначе петля) — см. вопросы сессии 2.
 2. **Egress DoH из контейнера** идёт напрямую через WAN (как сейчас у роутера); при необходимости VPN для DNS — отдельные mangle-правила (вне текущего объёма).
-3. **Двойной кэш** — временно снизить `cache-max-ttl` роутера для чистоты статистики (не обязательно).
+3. **Двойной кэш** — в сессии 2 кэш сервиса выключен, кэширует только RouterOS. При переходе на топологию «контейнер впереди» кэш контейнера включается: он нужен для MIN-TTL на повторах и точной статистики; кэш роутера тогда работает как дедуп позади (не дублирование).
 4. **Пустой `ads_block`** — правило в forward ссылается на пустой список; вне объёма.
 
 ## Definition of Done
@@ -190,21 +200,58 @@ rules:
 
 Не проверено: живое развёртывание на роутере.
 
-## Следующий шаг (сессия 2)
+## Следующий шаг (сессия 2) — согласованный план
 
-Первый деплой — **режим «только кэш»**:
+### Этап 2.1. CI: сборка и публикация образа
 
-- `cache.min_ttl` = **3600** (1 час) — минимизировать обращения к апстриму.
-- Группа по умолчанию `a` — `udp`, **primary = DNS роутера** (`192.168.88.1`), без внешних DoH. Роутер пока единственный резолвер и продолжает наполнять `to_vpn_list`.
-- Внешние DoH-апстримы добавляем **отдельным этапом позже**.
+- [ ] `.github/workflows/docker.yml`: триггеры `push` в `main` + `workflow_dispatch`; `docker/setup-buildx-action` (+ QEMU), `docker/build-push-action` с `platforms: linux/arm64`, `push: true`; теги `latest` и `sha-<short>`; кэш слоёв через `type=gha`; логин по секретам **`DOCKER_USERNAME` / `DOCKER_PASSWORD`** (уже настроены в репозитории).
+- [ ] Первичный коммит проекта (артефакты `tmp/` уже в `.gitignore`; репозиторий `origin` = `github.com/nskforward/dns-guard`, коммитов пока нет).
+- [ ] `git push -u origin main`, дождаться зелёного ран-а.
+- [ ] Проверить, что репозиторий Docker Hub **публичный** (роутер тянет анонимно): `curl https://hub.docker.com/v2/repositories/nskforward/dns-guard/tags`. Фолбэк при приватном — прописать creds в `/container/config` роутера.
 
-Подготовить к сессии 2:
+### Этап 2.2. Деплой на роутер (SSH `admin@192.168.88.1`, через `expect`)
 
-- [ ] конфиг для роутера: `groups.a.primary: ["192.168.88.1"]`, `min_ttl: 3600`, `web.listen: ":8080"`.
-- [ ] `deploy.rsc` / пошаговые команды RouterOS: veth `192.168.89.3/24` + bridge `container`, mount конфига, `/container/add`, старт, диагностика.
+- [ ] `veth-dnsguard 192.168.89.3/24 gateway=192.168.89.1` + `/interface bridge port add bridge=container interface=veth-dnsguard`.
+- [ ] Конфиг залить по SFTP в `/usb1/volumes/dns-guard/conf/config.yaml`:
+  ```yaml
+  listen:  {udp: ":53", tcp: ":53"}
+  web:     {enabled: true, listen: ":8080"}
+  cache:   {enabled: false, max_entries: 10000, min_ttl: 3600, max_ttl: 0}
+  upstream:{timeout: 3s}
+  groups:
+    a: {protocol: udp, primary: ["192.168.88.1"]}
+  default_group: a
+  rules: []
+  ```
+- [ ] `/container/mounts add name=dns-guard-conf src=/usb1/volumes/dns-guard/conf dst=/etc/dns-guard`.
+- [ ] `/container/add remote-image=nskforward/dns-guard:latest arch=arm64 name=dns-guard interface=veth-dnsguard mounts=dns-guard-conf root-dir=/usb1/images/dns-guard dns=192.168.88.1 start-on-boot=yes logging=yes` → `/container/start`.
+- [ ] Диагностика: `/container print`, `/log print where topics~"container"`.
 
-Вопросы, которые нужно закрыть до правок на роутере:
+### Этап 2.3. Приёмка
 
-1. **Петля.** Апстрим контейнера = DNS роутера ⇒ `/ip dns servers` роутера **нельзя** направлять на контейнер. Определить, кто и как обращается к `192.168.89.3` в режиме «только кэш» (временно DHCP-DNS на клиентах; на роутере сначала `dig @192.168.89.3`), и подтвердить, что `to_vpn_list` при этом наполняется (запрос приходит в DNS роутера от контейнера — ожидаемо да, но проверить).
-2. **Доступ к роутеру из сессии.** `192.168.88.1:22` недоступен (`No route to host`), Docker daemon в окружении не запущен. Нужен рабочий путь: SSH/джамп-хост к роутеру и registry для arm64-образа — либо пользователь выполняет команды на роутере вручную, а мы готовим конфиг и скрипты.
-3. **Двойной кэш.** При MIN-TTL 1 час кэш роутера также активен — решить, снижать ли `cache-max-ttl` роутера (не обязательно).
+- [ ] `dig @192.168.89.3 <домен>` (UDP) и `+tcp` — ответы есть.
+- [ ] MIN-TTL: сравнить TTL у роутера (`@192.168.88.1`, мелкий TTL) и у контейнера → **≥ 3600**.
+- [ ] `curl http://192.168.89.3:8080/api/stats` — `total` растёт, домены в top-100 видны (`cache_len=0` — ожидаемо, кэш выключен).
+- [ ] `to_vpn_list`: `count-only` было 23 → растёт после резолва доменов из FWD-списка.
+- [ ] RAM: `/container print` memory-current (~10–15 MiB ожидаемо).
+- [ ] `PUT /api/config` → hot-reload без рестарта.
+- [ ] **Откат:** `/container stop` + `/container remove` + veth + mount. Клиенты и `/ip dns` не затронуты.
+
+## Состояние на начало сессии 2
+
+- Код (этапы 0–6) и локальная часть этапа 7 — зелёные (`go build/vet/test`), см. «Состояние на конец сессии 1».
+- Роутер доступен по SSH; аудит выполнен (см. «Контекст»), все блокеры сессии 1 по доступу сняты.
+- Закрытые вопросы сессии 1:
+
+  1. **Петля.** В режиме cache-only апстрим контейнера = DNS роутера; `/ip dns servers` роутера на контейнер не указывает → петли нет. Кто обращается к `192.168.89.3` в сессии 2 — только диагностика (`dig` с Mac); DHCP-DNS клиентов не трогаем. `to_vpn_list` наполняется, т.к. запросы приходят в DNS роутера от контейнера.
+  2. **Доступ.** SSH к роутеру работает (`admin`/`admin1`, `expect`); образ публикуется через GitHub Actions → доступен роутеру из Docker Hub. Локальный Docker-демон не нужен.
+  3. **Двойной кэш.** В сессии 2 кэш сервиса выключен — кэширует только RouterOS; пересечения нет. Вопрос повторно рассматривается при переходе на топологию «контейнер впереди» (тогда кэш нужен для MIN-TTL на повторах и точной статистики).
+
+## Состояние на конец сессии 1 (архив)
+
+Код готов и проверен локально: этапы 0–6 полностью, этап 7 — вся локальная часть.
+
+- `go build ./...`, `go vet ./...`, `go test ./...` — зелёные.
+- Юнит-тесты: `rules`, `cache`, `config`, `stats`, `server` (fake-апстрим).
+- Локальный smoke (через фейковый апстрим `127.0.0.1:5355`; временные файлы — в gitignored `tmp/`): UDP и TCP отдают ответы; MIN-TTL (5→60); кэш miss→hit (`cache_len:1`); `PUT /api/config` применяется и сохраняется в файл; невалидный конфиг → 400; `POST /api/cache/flush` → ok.
+- Отступление: Docker-образ работает от root (не nonroot) — nonroot не займёт порт 53 без `CAP_NET_BIND_SERVICE` (см. комментарий в `Dockerfile`).
