@@ -5,6 +5,8 @@ DNS-сервис для MikroTik RouterOS (ARM64 контейнер): прини
 (UDP / DoT / DoH) с primary+fallback, применяет MIN-TTL, кэширует ответы
 в памяти и показывает статистику (top-100 доменов с пиковым RPM) в веб-UI.
 
+> **Актуальное состояние:** сессии 1–3 завершены — код (этапы 0–6), live-деплой контейнера на роутере (сессия 2), собственный DoH-сервер на VPS + клиентская опция `hosts` (сессия 3). Остался **этап C** — подключить VPS-DoH как primary в контейнере; план — в разделе «Следующий шаг (сессия 4)» в конце файла. Свежие разделы: «Сессия 3 — сделано», «Следующий шаг (сессия 4)».
+
 ## Контекст: результаты разведки роутера (обновлено в сессии 2)
 
 - **hAP ax³**, RouterOS **7.24.5** (stable), ARM64, 4×864 МГц, 1 ГБ RAM (~638 МБ свободно), uptime на момент аудита 35 мин.
@@ -45,6 +47,12 @@ DNS-сервис для MikroTik RouterOS (ARM64 контейнер): прини
 | Топология полной фазы | **Открытый вопрос** из-за `to_vpn_list`: контейнер с внешним DoH не проходит через резолвер роутера, значит не наполняет `to_vpn_list`. Варианты — «роутер → контейнер» (список наполняют статические FWD роутера) либо зональные правила для VPN-доменов через резолвер роутера |
 | Апстрим (целевой) | **Свой DoH-сервер на VPS** как primary для контейнера (свой IP/443 — не зависит от блокировок и капризов публичных DoH), публичные DoH (Quad9/AdGuard) — fallback |
 | Сборка/публикация образа | **GitHub Actions** (buildx, `linux/arm64`) → Docker Hub `nskforward/dns-guard`; локальный Docker-демон не требуется |
+| DoH-сервер на VPS (сессия 3) | **nginx (TLS/LE + секретный путь) → `doh-proxy` (plain HTTP) → `unbound` (рекурсор, DNSSEC)**. Порт **8443** (443 занят `mtg`) |
+| Авторизация DoH | **Секретный путь** в URL (стиль NextDNS/AdGuard), проверяет nginx; плюс `limit_req` от перебора |
+| TLS-точка VPS | Существующий vhost **`stream2.sla9.ru:8443`** (LE-серт, http2) — новых доменов/сертов не заводили |
+| Резолв хостнейма апстрима | Групповая опция **`hosts`** (статический хостнейм→IP) — bootstrap plain-DNS из контейнера недоступен (UDP/53 закрыт), URL по IP ломает проверку серта |
+| Backend DoH на VPS | `unbound` как **свой рекурсор** (не форвардер на публичные DNS) — независимость от чужих резолверов |
+| Этап C (подключение контейнера) | **Отложено** по решению пользователя на отдельную сессию (см. «Следующий шаг (сессия 4)») |
 
 ## Архитектура
 
@@ -70,6 +78,26 @@ DNS-сервис для MikroTik RouterOS (ARM64 контейнер): прини
 - `internal/server` — DNS-пайплайн (UDP+TCP), hot-reload
 - `internal/web` — dashboard + REST API + YAML-редактор (embed)
 - `main.go` — флаги, сигналы
+
+### Внешний DoH-апстрим на VPS (сессия 3)
+
+Помимо внутреннего пайплайна dns-guard, в сессии 3 развёрнут собственный DoH-сервер на VPS `157.228.153.163` (Ubuntu 24.04.5):
+
+```
+контейнер dns-guard
+  primary: https://stream2.sla9.ru:8443/<TOKEN>/dns-query
+     │  hosts: stream2.sla9.ru → 157.228.153.163   (plain-DNS bootstrap из контейнера недоступен)
+     ▼  TLS (LE-серт) + ALPN h2
+  nginx :8443  (существующий vhost stream2.sla9.ru)
+     location = /<TOKEN>/dns-query  →  proxy_pass http://127.0.0.1:8053/dns-query
+     (limit_req; чужой путь → 404; корень сайта не тронут)
+     ▼  plain HTTP/1.1
+  doh-proxy 127.0.0.1:8053  (jedisct1/doh-server 0.10.0, systemd, DynamicUser)
+     ▼  plain DNS (UDP/TCP)
+  unbound 127.0.0.1:53  (рекурсор от корня, DNSSEC, qname-minimisation, кэши под 1 ГБ)
+```
+
+Почему `doh-proxy`, а не DoH самого unbound: unbound DoH — **только HTTP/2 (h2c)**; distro-nginx 1.24 не умеет HTTP/2 к апстриму (`proxy_http_version 2` появился лишь в nginx 1.29.4/mainline). `doh-proxy` — тонкий HTTP/1.1→DNS-фронтенд, специально сделанный для работы за reverse-proxy, поэтому рабочий nginx и `mtg`/443 не трогали.
 
 ## Схема конфига (config.example.yaml)
 
@@ -97,6 +125,11 @@ groups:
     primary:  ["https://dns.google/dns-query"]
     fallback: ["https://cloudflare-dns.com/dns-query"]
     bootstrap: ["77.88.8.8"]
+  vps:                        # свой DoH на VPS: соединение по IP, хостнейм — для TLS
+    protocol: doh
+    primary:  ["https://stream2.sla9.ru:8443/<TOKEN>/dns-query"]
+    fallback: ["https://9.9.9.9/dns-query", "https://94.140.14.14/dns-query"]
+    hosts: {"stream2.sla9.ru": "157.228.153.163"}
 default_group: a
 rules:
   - zone: "ru"
@@ -117,7 +150,7 @@ rules:
 
 - [x] `internal/upstream/upstream.go` — `Resolver`, `New(...)`, `Group` (ротация primary → fallback по ошибке)
 - [x] `internal/upstream/udp.go` — UDP-клиент + `normalizeHostPort`
-- [x] `internal/upstream/dialer.go` — bootstrap-диалер (резолв DoH/DoT хостнеймов через plain DNS)
+- [x] `internal/upstream/dialer.go` — bootstrap-диалер (резолв DoH/DoT хостнеймов через plain DNS) + статический маппинг `hosts` (сессия 3)
 - [x] `internal/upstream/dot.go` — DoT-клиент (tcp-tls, TLS 1.2+, SNI)
 - [x] `internal/upstream/doh.go` — DoH-клиент (RFC 8484, POST application/dns-message, HTTP/2)
 
@@ -170,7 +203,7 @@ rules:
   - [x] `/container/add remote-image=... arm64`
   - [x] переключение `/ip dns set use-doh-server="" servers=192.168.89.3` (+ откат)
   - [x] предупреждение про `to_vpn_list` / VPN-маршрутизацию
-- [ ] `.github/workflows/docker.yml` — сборка и push `nskforward/dns-guard:latest` (arm64) через Actions
+- [x] `.github/workflows/docker.yml` — сборка и push `nskforward/dns-guard:latest` (arm64) через Actions (сделано в сессии 2)
 
 ### Этап 7. Тесты и приёмка — ⏳ частично (осталось на роутере)
 
@@ -179,7 +212,7 @@ rules:
 - [x] локальный smoke: конфиг + `dig @127.0.0.1` по UDP и TCP
 - [x] проверка MIN-TTL: апстрим с малым TTL (5s) → ответ ≥ min_ttl (60s)
 - [x] проверка fallback: недоступный primary → ответ через fallback
-- [ ] сборка arm64-образа через GitHub Actions, публикация в Docker Hub и загрузка на роутер
+- [x] сборка arm64-образа через GitHub Actions, публикация в Docker Hub (`nskforward/dns-guard:latest`)
 - [ ] живая приёмка на роутере: `dig @192.168.89.3` (UDP/TCP), TTL ≥ 3600, `/api/stats`, рост `to_vpn_list`, RAM (`/container print` memory-current)
 
 ---
@@ -190,6 +223,9 @@ rules:
 2. **Egress DoH из контейнера** идёт напрямую через WAN (как сейчас у роутера); при необходимости VPN для DNS — отдельные mangle-правила (вне текущего объёма).
 3. **Двойной кэш** — в сессии 2 кэш сервиса выключен, кэширует только RouterOS. При переходе на топологию «контейнер впереди» кэш контейнера включается: он нужен для MIN-TTL на повторах и точной статистики; кэш роутера тогда работает как дедуп позади (не дублирование).
 4. **Пустой `ads_block`** — правило в forward ссылается на пустой список; вне объёма.
+5. **Секретный путь DoH** попадает в `access.log` nginx (читает только root) и в конфиг контейнера. При утечке — ротация токена: правка `location` в nginx + `hosts`/`primary` в конфиге контейнера (две точки). Токен хранить только в `/root/doh-token` на VPS и в конфиге контейнера, **не коммитить в git**.
+6. **Порт 8443** нестандартный — если ISP начнёт фильтровать, сменить порт (nginx `listen` + UFW + URL в конфиге контейнера — 3 строки). Опционально позже: SNI-разделение 443 через `nginx stream`/`ssl_preread` (свой домен → DoH, остальное → `mtg`), чтобы DoH шёл именно по 443.
+7. **`doh-proxy` — сторонний бинарник** (не из apt), обновляется вручную из GitHub Releases. Альтернатива при нежелании — апгрейд nginx до mainline (≥1.29.4) и удаление `doh-proxy`.
 
 ## Definition of Done
 
@@ -262,16 +298,101 @@ rules:
 - **Апстрим переопределён на DoH** (см. «Находки»): план «cache-only с апстримом = роутер» нереален — роутер не отвечает контейнеру на UDP/53, а внешний UDP/53 блокируется. Контейнер работает через DoH (Quad9/AdGuard), TTL 3600.
 - Временные правки firewall (input‑accept для контейнера, членство `container` в `LAN`) **откачены** — не потребовались.
 
-## Следующий шаг (сессия 3)
+## Сессия 3 — сделано: собственный DoH-сервер на VPS
 
-**Цель: поднять собственный DoH-сервер на VPS и сделать его primary-апстримом контейнера.**
+**Цель была:** поднять свой DoH-сервер на VPS `157.228.153.163` и подготовить клиент dns-guard к использованию его как primary. Достигнуто (этапы A и B); подключение в контейнере (этап C) отложено по решению пользователя.
 
-- [ ] Подготовить DoH-сервер на VPS: TLS на 443 (Let's Encrypt), RFC 8484 (`application/dns-message`, POST), HTTP/2.
-      Вариант реализации — обсудить: тот же dns-guard в DoH-режиме / Unbound / CoreDNS / отдельный doh-proxy.
-- [ ] Проверить доступность и стабильность VPS-DoH из контейнера на роутере (порт 443 к произвольному IP; убедиться, что блокировки провайдера его не затрагивают).
-- [ ] Перевести `groups.a.primary` контейнера на свой DoH; публичные Quad9/AdGuard оставить в `fallback`. Проверить MIN-TTL и статистику.
-- [ ] Закрыть вопрос топологии с `to_vpn_list` (варианты — в таблице решений): нужен ли резолв VPN-доменов через роутер/статические FWD, и как это совместить с внешним DoH.
-- [ ] Дозаполнить приёмку сессии 2: TCP-`dig` от клиента, RAM (`/container print` memory-current) в динамике, при необходимости — сценарий отката.
+### Разведка VPS
+
+- **Ubuntu 24.04.5 LTS** (не 26), x86_64, 1 ГБ RAM (~600 МБ свободно), диск 8.8 ГБ (3.7 свободно).
+- **443 занят `mtg`** (MTProto-прокси, raw TCP) — поделить нельзя. **80** и **8443** — nginx; на 8443 существующий vhost **`stream2.sla9.ru`** с LE-сертом (действует до 2027-01-06, `certbot.timer` активен, `webroot`).
+- UFW: открыты 22/80/443; **8443 пришлось открыть**. Egress свободный (UDP/TCP 53, HTTPS наружу).
+- `unbound`/`docker` не были установлены; `dig`, `curl`, `openssl`, `python3` есть.
+
+### Этап A (VPS DoH-сервер) — ✅
+
+- [x] `apt install unbound` (1.19.2). Конфиг `/etc/unbound/unbound.conf.d/doh-guard.conf`: `interface: 127.0.0.1` (только localhost, plain DNS на :53), `access-control` localhost-only, `do-ip6: no`, `hide-identity/version`, `qname-minimisation`, `prefetch`, `harden-*`, кэши `msg 32m / rrset 64m / key 16m / neg 4m`. DNSSEC — из штатного `root-auto-trust-anchor-file.conf`. RAM ~19 МБ.
+- [x] `doh-proxy` (jedisct1/doh-server **0.10.0**, из `.deb` amd64) → `/usr/bin/doh-proxy`, свой systemd-юнит `/etc/systemd/system/doh-proxy.service`: `doh-proxy -H stream2.sla9.ru -u 127.0.0.1:53 -l 127.0.0.1:8053`, `DynamicUser`, `ProtectSystem=strict`, без capabilities. RAM ~10 МБ.
+- [x] **Токен** (секретный путь): `openssl rand -base64 32` (43 символа, base64url); хранится на VPS в **`/root/doh-token`** (chmod 600). В git **не коммитить** — в плане плейсхолдер `<TOKEN>`.
+- [x] nginx: в vhost `stream2.sla9.ru` добавлены `limit_req_zone ... zone=doh:10m rate=100r/s;` и локация
+      `location = /<TOKEN>/dns-query { limit_req zone=doh burst=200 nodelay; proxy_pass http://127.0.0.1:8053/dns-query; proxy_http_version 1.1; proxy_set_header Connection ""; ... }`.
+      Бэкап оригинала: **`/root/stream2.sla9.ru.orig-20261016`**.
+- [x] `ufw allow 8443/tcp comment "DoH nginx"`.
+- [x] certbot: deploy-хук `/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh` (`systemctl reload nginx`), чтобы после автопродления серта nginx подхватил новый.
+- [x] `mtg`/443, сайт на 80/8443, fail2ban — не тронуты.
+
+### Ключевая находка (отступление от первоначального плана)
+
+DoH в unbound — **только HTTP/2 (h2c)**, а distro-nginx 1.24 не умеет HTTP/2 к апстриму (`proxy_http_version 2` появился в nginx **1.29.4**, mainline). Поэтому `unbound` отдаёт обычный DNS на `127.0.0.1:53`, а DoH-фронтендом за nginx стал **`doh-proxy`** (HTTP/1.1). Вариант «обновить nginx до mainline» отвергнут ради ненарушения рабочего nginx/`mtg`.
+
+### Этап B (клиент dns-guard) — ✅
+
+- [x] `config.Group.Hosts map[string]string` (`hosts:`) — статический маппинг **хостнейм→IP**, приоритетнее bootstrap; валидация (значения — IP) и нормализация (lowercase/trim). Коммит `682287d`.
+- [x] `dialer.go` — `staticHost()`; `doh.go` — обёртка `DialContext` (адрес соединения → IP, хостнейм остаётся в URL для TLS-SNI/проверки серта); `dot.go` — подстановка адреса соединения при сохранении `ServerName`.
+- [x] `New(...)`/`NewGroup(...)` прокидывают `hosts`; `config.example.yaml` + `README.md` обновлены.
+- [x] Тесты: `config` (нормализация/валидация `hosts`), `upstream` (интеграционный — подстановка на локальный DoH-сервер по неразрешимому имени). `go build/vet/test` — зелёные.
+- [x] CI `success` (run `38901514093`, коммит `682287d`) → образ **`nskforward/dns-guard:latest`** (arm64) обновлён.
+
+### Живая проверка VPS (внешняя, через тот же ISP-путь)
+
+- `https://stream2.sla9.ru:8443/<TOKEN>/dns-query` → **200**, валидный `application/dns-message`, TLS-верификация `ssl_verify_result=0` (нормальный LE-серт).
+- Чужой путь → **404**; корень сайта → **200** (не сломан).
+- DNSSEC: подписанный домен → флаг `ad`; bogus (`sigfail.verteiltesysteme.net`) → `SERVFAIL`. Рекурсия идёт через unbound (`total.num.queries` растёт).
+- Порт **8443 провайдером не блокируется**.
+
+### Откат (если понадобится)
+
+- nginx: `cp /root/stream2.sla9.ru.orig-20261016 /etc/nginx/sites-available/stream2.sla9.ru && nginx -t && systemctl reload nginx`; `ufw delete allow 8443/tcp`.
+- Сервисы: `systemctl disable --now doh-proxy unbound`; `apt remove unbound`; `rm /usr/bin/doh-proxy /etc/systemd/system/doh-proxy.service`.
+- Клиентов и `/ip dns` роутера всё это **не касается** (этап C не выполнялся).
+
+## Следующий шаг (сессия 4) — Этап C: подключить VPS-DoH как primary в контейнере
+
+**Цель:** перевести контейнер `dns-guard` на роутере на свой DoH как primary; публичные Quad9/AdGuard — fallback. Это единственный невыполненный пункт изначального запроса (вынесен отдельным шагом).
+
+### Доступы и факты
+
+- VPS: `ssh root@157.228.153.163` (key-auth, BatchMode). Токен: `/root/doh-token` на VPS. DoH-URL: `https://stream2.sla9.ru:8443/<TOKEN>/dns-query`.
+- Роутер: SSH `admin@192.168.88.1` (пароль `admin1`, вводится через `expect`; `sshpass` нет). Контейнер `dns-guard`: `interface=veth-dnsguard` (`192.168.89.3`), `mountlists=dns-guard-conf` (`/usb1/dns-guard/conf/config.yaml` → `/etc/dns-guard/config.yaml`), web `http://192.168.89.3:8080`.
+- **Важно:** текущий образ в контейнере — старый (без поддержки `hosts`). Сначала обновить образ, потом применять конфиг с `hosts`.
+
+### Шаги
+
+1. [ ] **Обновить образ** контейнера на роутере: pull `nskforward/dns-guard:latest` и пересоздать/обновить контейнер с теми же параметрами (`interface=veth-dnsguard`, `mountlists=dns-guard-conf`, `root-dir=/usb1/images/dns-guard`, `dns=192.168.88.1`, `start-on-boot=yes`, `logging=yes`). Проверить `/container print` и логи.
+2. [ ] **Токен** прочитать на VPS (`cat /root/doh-token`) — подставить в URL ниже.
+3. [ ] **`PUT /api/config`** на `http://192.168.89.3:8080` (или записать в `/usb1/dns-guard/conf/config.yaml` через SFTP):
+   ```yaml
+   listen:  {udp: ":53", tcp: ":53"}
+   web:     {enabled: true, listen: ":8080"}
+   cache:   {enabled: false, max_entries: 10000, min_ttl: 3600, max_ttl: 0}
+   upstream:{timeout: 3s}
+   groups:
+     a:
+       protocol: doh
+       primary:  ["https://stream2.sla9.ru:8443/<TOKEN>/dns-query"]
+       fallback: ["https://9.9.9.9/dns-query", "https://94.140.14.14/dns-query", "https://1.1.1.1/dns-query"]
+       hosts: {stream2.sla9.ru: 157.228.153.163}
+   default_group: a
+   rules: []
+   ```
+4. [ ] **Приёмка:**
+   - `dig @192.168.89.3 example.com` (UDP) и `dig +tcp @192.168.89.3 example.com` → `NOERROR`, **TTL 3600** (MIN-TTL).
+   - `curl http://192.168.89.3:8080/api/stats` → `total` растёт, группы видны, `cache_len=0` (кэш выключен).
+   - На VPS `unbound-control stats | grep total.num.queries` — счётчик растёт ⇒ трафик реально идёт через свой сервер (не через fallback). Можно свериться по частоте: сгенерировать серию новых доменов и увидеть прирост.
+   - **Failover:** на VPS `systemctl stop doh-proxy` → `dig @192.168.89.3` всё ещё отвечает (через fallback); `systemctl start doh-proxy` → снова primary. Вернуть как было.
+   - RAM роутера: `/container print` `memory-current`; RAM VPS: `free -h`.
+5. [ ] **Дозаполнить приёмку сессии 2:** TCP-`dig` (пункт выше), динамика RAM.
+6. [ ] **Откат (при необходимости):** вернуть конфиг на публичные DoH (убрать `primary`/`hosts`) через `PUT /api/config`; при желании — образ и контейнер как в сессии 2.
+
+### Открытый вопрос (не входит в этап C)
+
+- **`to_vpn_list`:** контейнер с внешним DoH не проходит через DNS-резолвер роутера, поэтому не наполняет `to_vpn_list` для VPN-маршрутизации. Варианты (нужно выбрать отдельно): топология «роутер → контейнер» (`/ip dns set servers=192.168.89.3`, список наполняют статические FWD роутера) или зональные правила для VPN-доменов через резолвер роутера. См. раздел «Известные риски».
+
+### Definition of Done этапа C
+
+- `dig` UDP и TCP через контейнер отдают ответы, TTL ≥ 3600, статистика растёт.
+- Трафик резолва идёт через VPS-рекурсор (подтверждено `unbound-control stats`), fallback проверен отключением `doh-proxy`.
+- Клиенты и `/ip dns` роутера при этом не затронуты; петли нет.
 
 ## Состояние на начало сессии 2
 
