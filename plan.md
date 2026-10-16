@@ -204,15 +204,16 @@ rules:
 
 ### Этап 2.1. CI: сборка и публикация образа
 
-- [ ] `.github/workflows/docker.yml`: триггеры `push` в `main` + `workflow_dispatch`; `docker/setup-buildx-action` (+ QEMU), `docker/build-push-action` с `platforms: linux/arm64`, `push: true`; теги `latest` и `sha-<short>`; кэш слоёв через `type=gha`; логин по секретам **`DOCKER_USERNAME` / `DOCKER_PASSWORD`** (уже настроены в репозитории).
-- [ ] Первичный коммит проекта (артефакты `tmp/` уже в `.gitignore`; репозиторий `origin` = `github.com/nskforward/dns-guard`, коммитов пока нет).
-- [ ] `git push -u origin main`, дождаться зелёного ран-а.
-- [ ] Проверить, что репозиторий Docker Hub **публичный** (роутер тянет анонимно): `curl https://hub.docker.com/v2/repositories/nskforward/dns-guard/tags`. Фолбэк при приватном — прописать creds в `/container/config` роутера.
+- [x] `.github/workflows/docker.yml`: триггеры `push` в `main` + `workflow_dispatch`; `docker/setup-buildx-action` (+ QEMU), `docker/build-push-action` с `platforms: linux/arm64`, `push: true`; теги `latest` и `sha-<short>`; кэш слоёв через `type=gha`; логин по секретам **`DOCKER_USERNAME` / `DOCKER_PASSWORD`**.
+- [x] Первичный коммит проекта и `git push -u origin main` (коммит `f8b975e`).
+- [ ] **Блокер:** ран `38893687113` падает на шаге **Log in to Docker Hub** (следующие шаги пропущены). Нужно проверить секреты: `DOCKER_USERNAME` = аккаунт Docker Hub, `DOCKER_PASSWORD` = **access token** (не пароль аккаунта; парольная аутентификация на Docker Hub отключена). Также убедиться, что секреты заданы на уровне репозитория (не только organization/environment).
+- [ ] Перезапустить ран после исправления секретов.
+- [ ] Проверить, что репозиторий Docker Hub **публичный** (роутер тянет анонимно): `curl https://hub.docker.com/v2/repositories/nskforward/dns-guard/`. Фолбэк при приватном — прописать creds в `/container/config` роутера.
 
 ### Этап 2.2. Деплой на роутер (SSH `admin@192.168.88.1`, через `expect`)
 
 - [ ] `veth-dnsguard 192.168.89.3/24 gateway=192.168.89.1` + `/interface bridge port add bridge=container interface=veth-dnsguard`.
-- [ ] Конфиг залить по SFTP в `/usb1/volumes/dns-guard/conf/config.yaml`:
+- [ ] Конфиг залить по SFTP в `/usb1/dns-guard/conf/config.yaml`:
   ```yaml
   listen:  {udp: ":53", tcp: ":53"}
   web:     {enabled: true, listen: ":8080"}
@@ -223,8 +224,8 @@ rules:
   default_group: a
   rules: []
   ```
-- [ ] `/container/mounts add name=dns-guard-conf src=/usb1/volumes/dns-guard/conf dst=/etc/dns-guard`.
-- [ ] `/container/add remote-image=nskforward/dns-guard:latest arch=arm64 name=dns-guard interface=veth-dnsguard mounts=dns-guard-conf root-dir=/usb1/images/dns-guard dns=192.168.88.1 start-on-boot=yes logging=yes` → `/container/start`.
+- [ ] `/container/mounts add list=dns-guard-conf src=/usb1/dns-guard/conf dst=/etc/dns-guard mode=rw` (у `mounts` список задаётся через `list=`; у контейнера свойство — `mountlists=`).
+- [ ] `/container/add remote-image=nskforward/dns-guard:latest interface=veth-dnsguard mountlists=dns-guard-conf root-dir=/usb1/images/dns-guard dns=192.168.88.1 start-on-boot=yes logging=yes` → `/container/start` (у add нет параметров `os`/`arch` — определяются автоматически).
 - [ ] Диагностика: `/container print`, `/log print where topics~"container"`.
 
 ### Этап 2.3. Приёмка
@@ -236,6 +237,14 @@ rules:
 - [ ] RAM: `/container print` memory-current (~10–15 MiB ожидаемо).
 - [ ] `PUT /api/config` → hot-reload без рестарта.
 - [ ] **Откат:** `/container stop` + `/container remove` + veth + mount. Клиенты и `/ip dns` не затронуты.
+
+### Прогресс сессии 2 (хроника)
+
+- SSH к роутеру заработал (сеть Mac периодически флапает между LAN роутера и сетью провайдера — на деплой не влияет, т.к. нужен только LAN).
+- Каталог `usb1/volumes/` отсутствует; конфиг размещён в **`/usb1/dns-guard/conf/config.yaml`** (694 байта, загружен по SFTP).
+- Создано: `veth-dnsguard 192.168.89.3/24` + порт в бридж `container`; mount `list=dns-guard-conf src=/usb1/dns-guard/conf dst=/etc/dns-guard mode=rw`.
+- Контейнер `dns-guard` добавлен (`remote-image=nskforward/dns-guard:latest`, `mountlists=dns-guard-conf`, `root-dir=/usb1/images/dns-guard`, `dns=192.168.88.1`, `start-on-boot=yes`, `logging=yes`).
+- **Блокер:** образ не скачивается — `fetch manifest failed ... auth error`; репозиторий `nskforward/dns-guard` на Docker Hub пока не существует (проверено через `hub.docker.com API` → 404). Причина — ран CI упал на логине в Docker Hub (см. этап 2.1).
 
 ## Состояние на начало сессии 2
 
