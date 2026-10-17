@@ -53,8 +53,8 @@ func TestDomainsAPI(t *testing.T) {
 	if info.Domain != "a.example.com" || info.Total != 1 {
 		t.Fatalf("info = %+v", info)
 	}
-	if len(info.Answers) != 1 || info.Answers[0].Rcode != "NOERROR" || info.Answers[0].Upstream != "1.1.1.1:53" {
-		t.Fatalf("answers = %+v", info.Answers)
+	if info.Answer == nil || info.Answer.Rcode != "NOERROR" || info.Answer.Upstream != "1.1.1.1:53" {
+		t.Fatalf("answer = %+v", info.Answer)
 	}
 
 	// Неизвестный домен.

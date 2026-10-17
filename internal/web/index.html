@@ -562,33 +562,22 @@ function renderDomain(d) {
   const box = document.getElementById('m-last');
   box.innerHTML = '';
   box.className = '';
-  const answers = d.answers || [];
-  if (!answers.length) {
+  if (!d.answer) {
     box.className = 'muted';
-    box.textContent = 'No answer recorded yet.';
+    box.textContent = 'No successful answer recorded yet.';
     return;
   }
-  answers.forEach(a => box.appendChild(renderAnswer(a)));
+  box.appendChild(renderAnswer(d.answer));
 }
 
 function renderAnswer(last) {
   const card = document.createElement('div');
   card.className = 'answer-card';
 
-  const head = document.createElement('div');
-  const type = document.createElement('b');
-  type.textContent = last.qtype || '—';
-  head.appendChild(type);
-  head.appendChild(document.createTextNode(' · Answer: '));
-  const cls = last.rcode === 'NOERROR' ? 'rcode-ok' : last.rcode === 'NXDOMAIN' ? 'rcode-warn' : 'rcode-err';
-  const rc = document.createElement('b');
-  rc.className = cls;
-  rc.textContent = last.rcode === 'NOERROR' ? 'OK' : (last.rcode || '—');
-  head.appendChild(rc);
-  card.appendChild(head);
-
   const when = last.at ? new Date(last.at).toLocaleString('en-US') : '—';
+  const ok = last.rcode === 'NOERROR';
   const rows = [
+    ['Status', ok ? 'OK' : (last.rcode || '—'), ok ? 'rcode-ok' : 'rcode-err'],
     ['Source', last.from_cache ? 'cache' : 'upstream'],
   ];
   if (last.upstream) rows.push(['Upstream', last.upstream]);
@@ -597,31 +586,21 @@ function renderAnswer(last) {
 
   const meta = document.createElement('div');
   meta.className = 'meta-list';
-  rows.forEach(([k, v]) => {
+  rows.forEach(([k, v, cls]) => {
     const kd = document.createElement('div');
     kd.className = 'mk';
     kd.textContent = k;
     const vd = document.createElement('div');
     vd.className = 'mv';
+    if (cls) vd.classList.add(cls);
     vd.textContent = v;
     meta.appendChild(kd);
     meta.appendChild(vd);
   });
   card.appendChild(meta);
 
-  if (last.error) {
-    const err = document.createElement('div');
-    err.className = 'msg err';
-    err.textContent = 'Error: ' + last.error;
-    card.appendChild(err);
-  }
-
-  if (last.records && last.records.length) {
-    card.appendChild(subLabel('Answer'));
-    card.appendChild(preBlock(last.records));
-  } else {
-    card.appendChild(subLabel('Answer: no records (negative response)'));
-  }
+  card.appendChild(subLabel('Answer'));
+  card.appendChild(preBlock(last.records || []));
   if (last.authority && last.authority.length) {
     card.appendChild(subLabel('Authority (NS)'));
     card.appendChild(preBlock(last.authority));

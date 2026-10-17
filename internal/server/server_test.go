@@ -125,12 +125,12 @@ func TestServeDNSMissThenHit(t *testing.T) {
 		t.Fatalf("hits/misses = %d/%d", snap.CacheHits, snap.CacheMisses)
 	}
 
-	// Последний ответ по домену сохранён (второй запрос обслужен из кэша).
+	// Последний успешный ответ по домену сохранён (второй запрос из кэша).
 	info, ok := ss.DomainInfo("example.com")
-	if !ok || len(info.Answers) != 1 {
+	if !ok || info.Answer == nil {
 		t.Fatalf("last answer not recorded: %+v", info)
 	}
-	last := info.Answers[0]
+	last := info.Answer
 	if last.Rcode != "NOERROR" || !last.FromCache || len(last.Records) != 1 {
 		t.Fatalf("last = %+v", last)
 	}

@@ -26,8 +26,9 @@ const (
 	servfailEventsCap = 100
 	// latencySamples — сколько последних длительностей апстрима хранить для p90.
 	latencySamples = 256
-	// maxAnswersPerDomain — сколько последних ответов разных типов хранить на
-	// домен (A/AAAA/HTTPS/...); защита от роста памяти при переборе qtype.
+	// maxAnswersPerDomain — сколько последних успешных ответов разных типов
+	// хранить на домен (A/AAAA/HTTPS/...); защита от роста памяти при переборе
+	// qtype.
 	maxAnswersPerDomain = 8
 )
 
@@ -42,7 +43,7 @@ type DomainStat struct {
 // AnswerInfo — сведения о последнем ответе, выданном по домену.
 type AnswerInfo struct {
 	Rcode      string    `json:"rcode"`
-	Qtype      string    `json:"qtype"`
+	Qtype      string    `json:"qtype,omitempty"`
 	Records    []string  `json:"records,omitempty"`   // секция Answer
 	Authority  []string  `json:"authority,omitempty"` // секция Ns (обычно SOA)
 	Error      string    `json:"error,omitempty"`
@@ -52,11 +53,19 @@ type AnswerInfo struct {
 	At         time.Time `json:"at"`
 }
 
-// DomainInfo — статистика домена вместе с последними ответами по каждому
-// типу запроса (A, AAAA, HTTPS, ...), свежие сверху.
+// successful сообщает, что ответ отражает реально полученные записи: NOERROR
+// и хотя бы одна запись в секции Answer. Негативные ответы (NXDOMAIN, NODATA)
+// и SERVFAIL успешными не считаются.
+func (a *AnswerInfo) successful() bool {
+	return a.Rcode == "NOERROR" && len(a.Records) > 0
+}
+
+// DomainInfo — статистика домена и сводные сведения о том, что известно по
+// домену: все записи, склеенные из последних успешных ответов по каждому типу
+// запроса.
 type DomainInfo struct {
 	DomainStat
-	Answers []AnswerInfo `json:"answers,omitempty"`
+	Answer *AnswerInfo `json:"answer,omitempty"`
 }
 
 // UpstreamStat — счётчики попыток одного апстрима в группе.
@@ -294,7 +303,9 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 	d.total++
 	if info != nil {
 		cp := cloneAnswer(info, at)
-		d.storeAnswer(&cp)
+		if cp.successful() {
+			d.storeAnswer(&cp)
+		}
 		if failed {
 			d.servfail++
 			d.lastFail = &cp
@@ -302,8 +313,10 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 	}
 }
 
-// storeAnswer сохраняет последний ответ по его qtype. Число типов на домен
-// ограничено maxAnswersPerDomain: при переполнении вытесняется самый старый.
+// storeAnswer сохраняет последний успешный ответ по его qtype; негативные
+// ответы (NXDOMAIN, NODATA) и SERVFAIL сюда не попадают и не затирают ранее
+// накопленные записи. Число типов на домен ограничено maxAnswersPerDomain:
+// при переполнении вытесняется самый старый.
 func (d *domain) storeAnswer(info *AnswerInfo) {
 	if d.answers == nil {
 		d.answers = make(map[string]*AnswerInfo)
@@ -453,8 +466,8 @@ func (s *Stats) DomainsPage(page, size int, search string) DomainsPage {
 	return DomainsPage{Total: total, Page: page, Pages: pages, Size: size, Items: out[start:end]}
 }
 
-// DomainInfo возвращает статистику домена и последние ответы по каждому qtype
-// (свежие сверху).
+// DomainInfo возвращает статистику домена и сводные сведения о нём: записи,
+// склеенные из последних успешных ответов по всем типам запроса.
 func (s *Stats) DomainInfo(name string) (DomainInfo, bool) {
 	key := normalize(name)
 	if key == "" {
@@ -469,18 +482,50 @@ func (s *Stats) DomainInfo(name string) (DomainInfo, bool) {
 		return DomainInfo{}, false
 	}
 	info := DomainInfo{DomainStat: statOf(key, d, mid)}
-	for _, a := range d.answers {
-		info.Answers = append(info.Answers, cloneAnswer(a, a.At))
+	if len(d.answers) > 0 {
+		a := mergedAnswer(d.answers)
+		info.Answer = &a
 	}
 	s.mu.Unlock()
 
-	sort.Slice(info.Answers, func(i, j int) bool {
-		if !info.Answers[i].At.Equal(info.Answers[j].At) {
-			return info.Answers[i].At.After(info.Answers[j].At)
-		}
-		return info.Answers[i].Qtype < info.Answers[j].Qtype
-	})
 	return info, true
+}
+
+// mergedAnswer склеивает последние успешные ответы по всем qtype в один:
+// записи объединяются и дедуплицируются, а атрибуты (источник, апстрим,
+// длительность, время) берутся у самого свежего ответа.
+func mergedAnswer(answers map[string]*AnswerInfo) AnswerInfo {
+	var latest *AnswerInfo
+	for _, a := range answers {
+		if latest == nil || a.At.After(latest.At) ||
+			(a.At.Equal(latest.At) && a.Qtype < latest.Qtype) {
+			latest = a
+		}
+	}
+	out := cloneAnswer(latest, latest.At)
+	// Сводный ответ не относится к одному типу запроса.
+	out.Qtype = ""
+	out.Records = mergeUnique(answers, func(a *AnswerInfo) []string { return a.Records })
+	out.Authority = mergeUnique(answers, func(a *AnswerInfo) []string { return a.Authority })
+	return out
+}
+
+// mergeUnique объединяет выбранные строки всех ответов, убирает дубликаты и
+// сортирует результат, чтобы порядок записей был стабильным.
+func mergeUnique(answers map[string]*AnswerInfo, pick func(*AnswerInfo) []string) []string {
+	var out []string
+	seen := make(map[string]struct{})
+	for _, a := range answers {
+		for _, line := range pick(a) {
+			if _, ok := seen[line]; ok {
+				continue
+			}
+			seen[line] = struct{}{}
+			out = append(out, line)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ServfailPage возвращает домены с SERVFAIL, отсортированные по убыванию
