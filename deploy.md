@@ -61,7 +61,7 @@ set -a; . ./.env; set +a
 | Параметр | Значение |
 |---|---|
 | Имя | `dns-guard` |
-| `remote-image` | `nskforward/dns-guard:latest` |
+| `remote-image` | `nskforward/dns-guard:1.0.7` |
 | `root-dir` | `/usb1/images/dns-guard` |
 | `interface` | `veth-dnsguard` (IP `192.168.89.3`) |
 | `mountlists` | `dns-guard-conf` (конфиг в `/etc/dns-guard/config.yaml`) |
@@ -190,7 +190,7 @@ curl -s "https://hub.docker.com/v2/repositories/nskforward/dns-guard/tags?page_s
 ```sh
 # веб-UI и API контейнера
 curl -s http://192.168.89.3:8080/api/health        # {"status":"ok"}
-curl -s http://192.168.89.3:8080/api/version       # {"version":"1.0.4"}
+curl -s http://192.168.89.3:8080/api/version       # {"version":"1.0.7"}
 curl -s http://192.168.89.3:8080/api/upstreams     # статистика по группам
 
 # DNS через роутер (UDP и TCP)
