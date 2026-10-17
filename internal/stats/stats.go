@@ -26,6 +26,9 @@ const (
 	servfailEventsCap = 100
 	// latencySamples — сколько последних длительностей апстрима хранить для p90.
 	latencySamples = 256
+	// maxAnswersPerDomain — сколько последних ответов разных типов хранить на
+	// домен (A/AAAA/HTTPS/...); защита от роста памяти при переборе qtype.
+	maxAnswersPerDomain = 8
 )
 
 // DomainStat — статистика по полному доменному имени.
@@ -49,10 +52,11 @@ type AnswerInfo struct {
 	At         time.Time `json:"at"`
 }
 
-// DomainInfo — статистика домена вместе с последним ответом.
+// DomainInfo — статистика домена вместе с последними ответами по каждому
+// типу запроса (A, AAAA, HTTPS, ...), свежие сверху.
 type DomainInfo struct {
 	DomainStat
-	Last *AnswerInfo `json:"last,omitempty"`
+	Answers []AnswerInfo `json:"answers,omitempty"`
 }
 
 // UpstreamStat — счётчики попыток одного апстрима в группе.
@@ -129,13 +133,13 @@ type DomainsPage struct {
 
 // domain — счётчики одного домена.
 type domain struct {
-	minute   int64       // unix/60 минуты последней записи
-	count    uint64      // запросов в текущей минуте
-	peak     uint64      // максимум count за завершённые минуты
-	total    uint64      // всего запросов
-	servfail uint64      // SERVFAIL-ответов
-	last     *AnswerInfo // последний выданный ответ
-	lastFail *AnswerInfo // последний SERVFAIL-ответ
+	minute   int64                  // unix/60 минуты последней записи
+	count    uint64                 // запросов в текущей минуте
+	peak     uint64                 // максимум count за завершённые минуты
+	total    uint64                 // всего запросов
+	servfail uint64                 // SERVFAIL-ответов
+	answers  map[string]*AnswerInfo // последний ответ по каждому qtype
+	lastFail *AnswerInfo            // последний SERVFAIL-ответ
 }
 
 // upstreamCounters — счётчики попыток одного апстрима.
@@ -290,12 +294,34 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 	d.total++
 	if info != nil {
 		cp := cloneAnswer(info, at)
-		d.last = &cp
+		d.storeAnswer(&cp)
 		if failed {
 			d.servfail++
 			d.lastFail = &cp
 		}
 	}
+}
+
+// storeAnswer сохраняет последний ответ по его qtype. Число типов на домен
+// ограничено maxAnswersPerDomain: при переполнении вытесняется самый старый.
+func (d *domain) storeAnswer(info *AnswerInfo) {
+	if d.answers == nil {
+		d.answers = make(map[string]*AnswerInfo)
+	}
+	if _, ok := d.answers[info.Qtype]; !ok && len(d.answers) >= maxAnswersPerDomain {
+		var (
+			oldestKey string
+			oldest    time.Time
+			first     = true
+		)
+		for k, v := range d.answers {
+			if first || v.At.Before(oldest) {
+				oldestKey, oldest, first = k, v.At, false
+			}
+		}
+		delete(d.answers, oldestKey)
+	}
+	d.answers[info.Qtype] = info
 }
 
 // RecordUpstream учитывает одну попытку обращения к апстриму группы.
@@ -427,7 +453,8 @@ func (s *Stats) DomainsPage(page, size int, search string) DomainsPage {
 	return DomainsPage{Total: total, Page: page, Pages: pages, Size: size, Items: out[start:end]}
 }
 
-// DomainInfo возвращает статистику домена и сведения о последнем ответе.
+// DomainInfo возвращает статистику домена и последние ответы по каждому qtype
+// (свежие сверху).
 func (s *Stats) DomainInfo(name string) (DomainInfo, bool) {
 	key := normalize(name)
 	if key == "" {
@@ -442,11 +469,17 @@ func (s *Stats) DomainInfo(name string) (DomainInfo, bool) {
 		return DomainInfo{}, false
 	}
 	info := DomainInfo{DomainStat: statOf(key, d, mid)}
-	if d.last != nil {
-		cp := cloneAnswer(d.last, d.last.At)
-		info.Last = &cp
+	for _, a := range d.answers {
+		info.Answers = append(info.Answers, cloneAnswer(a, a.At))
 	}
 	s.mu.Unlock()
+
+	sort.Slice(info.Answers, func(i, j int) bool {
+		if !info.Answers[i].At.Equal(info.Answers[j].At) {
+			return info.Answers[i].At.After(info.Answers[j].At)
+		}
+		return info.Answers[i].Qtype < info.Answers[j].Qtype
+	})
 	return info, true
 }
 

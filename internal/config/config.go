@@ -42,6 +42,10 @@ type Cache struct {
 	MaxEntries int    `yaml:"max_entries"`
 	MinTTL     uint32 `yaml:"min_ttl"` // минимальный TTL в секундах (пол)
 	MaxTTL     uint32 `yaml:"max_ttl"` // максимальный TTL в секундах (0 = без ограничения)
+	// NegTTL — потолок TTL негативных ответов (NXDOMAIN / NODATA по SOA minttl),
+	// в секундах. 0 — не ограничивать сверх max_ttl и SOA. Защищает от
+	// длительной «консервации» ошибочного негативного ответа апстрима.
+	NegTTL uint32 `yaml:"neg_ttl"`
 }
 
 // Stats — параметры сбора статистики.

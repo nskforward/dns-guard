@@ -27,17 +27,19 @@ type Cache struct {
 	max     int
 	minTTL  uint32
 	maxTTL  uint32
+	negTTL  uint32
 	now     func() time.Time
 	entries map[string]*entry
 	lru     *list.List
 }
 
-// New создаёт кэш. minTTL/maxTTL — границы TTL в секундах (maxTTL=0 — без верхней границы).
-func New(maxEntries int, minTTL, maxTTL uint32) *Cache {
-	return newWithClock(maxEntries, minTTL, maxTTL, time.Now)
+// New создаёт кэш. minTTL/maxTTL — границы TTL в секундах (maxTTL=0 — без
+// верхней границы), negTTL — потолок TTL негативных ответов (0 — без потолка).
+func New(maxEntries int, minTTL, maxTTL, negTTL uint32) *Cache {
+	return newWithClock(maxEntries, minTTL, maxTTL, negTTL, time.Now)
 }
 
-func newWithClock(maxEntries int, minTTL, maxTTL uint32, now func() time.Time) *Cache {
+func newWithClock(maxEntries int, minTTL, maxTTL, negTTL uint32, now func() time.Time) *Cache {
 	if maxEntries <= 0 {
 		maxEntries = 10000
 	}
@@ -45,6 +47,7 @@ func newWithClock(maxEntries int, minTTL, maxTTL uint32, now func() time.Time) *
 		max:     maxEntries,
 		minTTL:  minTTL,
 		maxTTL:  maxTTL,
+		negTTL:  negTTL,
 		now:     now,
 		entries: make(map[string]*entry),
 		lru:     list.New(),
@@ -54,8 +57,9 @@ func newWithClock(maxEntries int, minTTL, maxTTL uint32, now func() time.Time) *
 // MinTTL возвращает настроенный минимальный TTL.
 func (c *Cache) MinTTL() uint32 { return c.minTTL }
 
-// key формирует ключ кэша по вопросу.
-func key(q dns.Question, do bool) string {
+// Key формирует ключ кэша по вопросу клиента. Экспортирован, чтобы вызывающий
+// код мог дедуплицировать одинаковые одновременные запросы (singleflight).
+func Key(q dns.Question, do bool) string {
 	doBit := "0"
 	if do {
 		doBit = "1"
@@ -67,7 +71,7 @@ func key(q dns.Question, do bool) string {
 // апстрима, от которого ответ был получен изначально (пустая строка, если не
 // известен).
 func (c *Cache) Get(q dns.Question, do bool) (*dns.Msg, string, bool) {
-	k := key(q, do)
+	k := Key(q, do)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[k]
@@ -86,16 +90,15 @@ func (c *Cache) Get(q dns.Question, do bool) (*dns.Msg, string, bool) {
 	return out, e.upstream, true
 }
 
-// Put сохраняет ответ (предварительно применив границы TTL).
-// upstream — адрес сервера, выдавшего ответ (может быть пустым).
-func (c *Cache) Put(q dns.Question, m *dns.Msg, upstream string) {
+// Put сохраняет ответ (предварительно применив границы TTL). Ключ строится по
+// вопросу и DO-биту КЛИЕНТА (q, do), а не по тому, что эхоил апстрим: это
+// исключает расхождение ключей Get/Put и «отравление» кэша ответом с чужим
+// вопросом. upstream — адрес сервера, выдавшего ответ (может быть пустым).
+func (c *Cache) Put(q dns.Question, do bool, m *dns.Msg, upstream string) {
 	if m == nil || m.Truncated {
 		return
 	}
 	if m.Rcode != dns.RcodeSuccess && m.Rcode != dns.RcodeNameError {
-		return
-	}
-	if len(m.Question) == 0 {
 		return
 	}
 	c.Apply(m)
@@ -103,7 +106,10 @@ func (c *Cache) Put(q dns.Question, m *dns.Msg, upstream string) {
 	if ttl == 0 {
 		return
 	}
-	k := key(m.Question[0], hasDO(m))
+	if c.negTTL > 0 && isNegative(m) && ttl > c.negTTL {
+		ttl = c.negTTL
+	}
+	k := Key(q, do)
 
 	stored := m.Copy()
 	now := c.now()
@@ -222,10 +228,8 @@ func minTTLOf(m *dns.Msg) uint32 {
 	return ttl
 }
 
-// hasDO определяет, запрашивал ли клиент DNSSEC (DO-бит в OPT).
-func hasDO(m *dns.Msg) bool {
-	if opt := m.IsEdns0(); opt != nil {
-		return opt.Do()
-	}
-	return false
+// isNegative сообщает, является ли ответ негативным: NXDOMAIN либо NODATA
+// (NOERROR без записей в Answer).
+func isNegative(m *dns.Msg) bool {
+	return m.Rcode == dns.RcodeNameError || (m.Rcode == dns.RcodeSuccess && len(m.Answer) == 0)
 }

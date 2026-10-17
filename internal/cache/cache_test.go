@@ -20,10 +20,10 @@ func msgA(name string, ttl uint32) (*dns.Msg, dns.Question) {
 
 func TestMinTTLAndDecay(t *testing.T) {
 	now := time.Unix(1000, 0)
-	c := newWithClock(100, 60, 0, func() time.Time { return now })
+	c := newWithClock(100, 60, 0, 0, func() time.Time { return now })
 
 	m, q := msgA("example.com", 5)
-	c.Put(q, m, "8.8.8.8:53")
+	c.Put(q, false, m, "8.8.8.8:53")
 
 	got, origin, ok := c.Get(q, false)
 	if !ok {
@@ -53,9 +53,9 @@ func TestMinTTLAndDecay(t *testing.T) {
 
 func TestMaxTTL(t *testing.T) {
 	now := time.Unix(0, 0)
-	c := newWithClock(10, 0, 30, func() time.Time { return now })
+	c := newWithClock(10, 0, 30, 0, func() time.Time { return now })
 	m, q := msgA("example.com", 3600)
-	c.Put(q, m, "")
+	c.Put(q, false, m, "")
 	got, _, ok := c.Get(q, false)
 	if !ok {
 		t.Fatal("miss")
@@ -67,7 +67,7 @@ func TestMaxTTL(t *testing.T) {
 
 func TestNegativeCaching(t *testing.T) {
 	now := time.Unix(0, 0)
-	c := newWithClock(10, 0, 0, func() time.Time { return now })
+	c := newWithClock(10, 0, 0, 0, func() time.Time { return now })
 
 	q := dns.Question{Name: "nx.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	m := new(dns.Msg)
@@ -76,7 +76,7 @@ func TestNegativeCaching(t *testing.T) {
 	m.Rcode = dns.RcodeNameError
 	soa, _ := dns.NewRR("example.com. 100 IN SOA ns.example.com. host.example.com. 1 2 3 4 30")
 	m.Ns = []dns.RR{soa}
-	c.Put(q, m, "")
+	c.Put(q, false, m, "")
 
 	if _, _, ok := c.Get(q, false); !ok {
 		t.Fatal("negative response not cached")
@@ -88,27 +88,71 @@ func TestNegativeCaching(t *testing.T) {
 }
 
 func TestSkipTruncatedAndError(t *testing.T) {
-	c := newWithClock(10, 0, 0, time.Now)
+	c := newWithClock(10, 0, 0, 0, time.Now)
 	m, q := msgA("example.com", 300)
 	m.Truncated = true
-	c.Put(q, m, "")
+	c.Put(q, false, m, "")
 	if c.Len() != 0 {
 		t.Fatal("truncated response must not be cached")
 	}
 
 	m2, q2 := msgA("other.com", 300)
 	m2.Rcode = dns.RcodeServerFailure
-	c.Put(q2, m2, "")
+	c.Put(q2, false, m2, "")
 	if c.Len() != 0 {
 		t.Fatal("SERVFAIL must not be cached")
 	}
 }
 
+func TestNegativeTTLCap(t *testing.T) {
+	now := time.Unix(0, 0)
+	c := newWithClock(10, 0, 0, 10, func() time.Time { return now })
+
+	q := dns.Question{Name: "nx.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	m := new(dns.Msg)
+	m.Question = []dns.Question{q}
+	m.Response = true
+	m.Rcode = dns.RcodeNameError
+	soa, _ := dns.NewRR("example.com. 3600 IN SOA ns.example.com. host.example.com. 1 2 3 4 3600")
+	m.Ns = []dns.RR{soa}
+	c.Put(q, false, m, "")
+
+	now = time.Unix(9, 0)
+	if _, _, ok := c.Get(q, false); !ok {
+		t.Fatal("negative entry must be cached within neg_ttl cap")
+	}
+	now = time.Unix(11, 0)
+	if _, _, ok := c.Get(q, false); ok {
+		t.Fatal("negative entry must expire after neg_ttl cap, not after SOA minttl")
+	}
+}
+
+// TestPutUsesClientQuestionAndDO проверяет, что ключ кэша строится по вопросу
+// клиента, а не по вопросу, который эхоил апстрим.
+func TestPutUsesClientQuestionAndDO(t *testing.T) {
+	c := newWithClock(10, 0, 0, 0, time.Now)
+	q := dns.Question{Name: "Example.COM.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	m, _ := msgA("example.com", 300)
+	// Апстрим вернул чужой вопрос — на ключ это влиять не должно.
+	m.Question = []dns.Question{{Name: "other.example.", Qtype: dns.TypeAAAA, Qclass: dns.ClassINET}}
+	c.Put(q, false, m, "")
+
+	if _, _, ok := c.Get(q, false); !ok {
+		t.Fatal("entry must be keyed by the client's question")
+	}
+	if _, _, ok := c.Get(m.Question[0], false); ok {
+		t.Fatal("upstream echo must not create a separate entry")
+	}
+	if _, _, ok := c.Get(q, true); ok {
+		t.Fatal("different DO bit must use a separate key")
+	}
+}
+
 func TestLRUEvictionAndFlush(t *testing.T) {
-	c := newWithClock(2, 0, 0, time.Now)
+	c := newWithClock(2, 0, 0, 0, time.Now)
 	for _, n := range []string{"a.com", "b.com", "c.com"} {
 		m, q := msgA(n, 300)
-		c.Put(q, m, "")
+		c.Put(q, false, m, "")
 	}
 	if c.Len() != 2 {
 		t.Fatalf("len = %d, want 2", c.Len())

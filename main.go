@@ -38,7 +38,7 @@ func main() {
 
 	var c *cache.Cache
 	if cfg.Cache.Enabled {
-		c = cache.New(cfg.Cache.MaxEntries, cfg.Cache.MinTTL, cfg.Cache.MaxTTL)
+		c = cache.New(cfg.Cache.MaxEntries, cfg.Cache.MinTTL, cfg.Cache.MaxTTL, cfg.Cache.NegTTL)
 	}
 	st := stats.New(cfg.Stats.MaxDomains)
 

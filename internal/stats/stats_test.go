@@ -384,7 +384,7 @@ func TestServfailBeyondDomainLimit(t *testing.T) {
 	}
 }
 
-func TestDomainInfoLastAnswer(t *testing.T) {
+func TestDomainInfoLastAnswers(t *testing.T) {
 	now := time.Unix(100, 0)
 	s := newWithClock(0, func() time.Time { return now })
 	s.Record("api.Example.com.", "g", false, &AnswerInfo{
@@ -393,6 +393,7 @@ func TestDomainInfoLastAnswer(t *testing.T) {
 		Records:  []string{"api.example.com. 60 IN A 1.2.3.4"},
 		Upstream: "1.1.1.1:53",
 	})
+	now = time.Unix(110, 0)
 	s.Record("api.example.com.", "g", true, &AnswerInfo{
 		Rcode:      "NXDOMAIN",
 		Qtype:      "AAAA",
@@ -400,28 +401,33 @@ func TestDomainInfoLastAnswer(t *testing.T) {
 		FromCache:  true,
 		DurationMs: 34.5,
 	})
+	// Новый A-ответ обновляет только запись своего типа, не затирая AAAA.
+	now = time.Unix(120, 0)
+	s.Record("api.example.com.", "g", false, &AnswerInfo{
+		Rcode:   "NOERROR",
+		Qtype:   "A",
+		Records: []string{"api.example.com. 30 IN A 5.6.7.8"},
+	})
 
 	di, ok := s.DomainInfo("API.EXAMPLE.COM")
 	if !ok {
 		t.Fatal("domain not found")
 	}
-	if di.Domain != "api.example.com" || di.Total != 2 {
+	if di.Domain != "api.example.com" || di.Total != 3 {
 		t.Fatalf("info = %+v", di)
 	}
-	if di.Last == nil {
-		t.Fatal("last answer missing")
+	// Свежие сверху: A (120), затем AAAA (110).
+	if len(di.Answers) != 2 {
+		t.Fatalf("answers = %+v", di.Answers)
 	}
-	if di.Last.Rcode != "NXDOMAIN" || di.Last.Qtype != "AAAA" || !di.Last.FromCache {
-		t.Fatalf("last = %+v", di.Last)
+	if a := di.Answers[0]; a.Qtype != "A" || a.Rcode != "NOERROR" || len(a.Records) != 1 ||
+		a.Records[0] != "api.example.com. 30 IN A 5.6.7.8" || !a.At.Equal(time.Unix(120, 0)) {
+		t.Fatalf("answers[0] = %+v", a)
 	}
-	if di.Last.DurationMs != 34.5 {
-		t.Fatalf("last.DurationMs = %v, want 34.5", di.Last.DurationMs)
-	}
-	if len(di.Last.Authority) != 1 || len(di.Last.Records) != 0 {
-		t.Fatalf("last sections = %+v", di.Last)
-	}
-	if !di.Last.At.Equal(now) {
-		t.Fatalf("last.At = %v, want %v", di.Last.At, now)
+	if a := di.Answers[1]; a.Qtype != "AAAA" || a.Rcode != "NXDOMAIN" || !a.FromCache ||
+		a.DurationMs != 34.5 || len(a.Authority) != 1 || len(a.Records) != 0 ||
+		!a.At.Equal(time.Unix(110, 0)) {
+		t.Fatalf("answers[1] = %+v", a)
 	}
 
 	if _, ok := s.DomainInfo("missing.test"); ok {
@@ -429,5 +435,32 @@ func TestDomainInfoLastAnswer(t *testing.T) {
 	}
 	if _, ok := s.DomainInfo(""); ok {
 		t.Fatal("empty domain must not be found")
+	}
+}
+
+// TestAnswersPerDomainLimit проверяет, что число последних ответов на домен
+// ограничено: при переполнении вытесняется самый старый тип.
+func TestAnswersPerDomainLimit(t *testing.T) {
+	now := time.Unix(0, 0)
+	s := newWithClock(0, func() time.Time { return now })
+	for i := 0; i < maxAnswersPerDomain+2; i++ {
+		now = time.Unix(int64(i), 0)
+		s.Record("a.test.", "g", false, &AnswerInfo{
+			Rcode: "NOERROR",
+			Qtype: fmt.Sprintf("T%d", i),
+		})
+	}
+	di, ok := s.DomainInfo("a.test")
+	if !ok {
+		t.Fatal("domain not found")
+	}
+	if len(di.Answers) != maxAnswersPerDomain {
+		t.Fatalf("answers = %d, want %d", len(di.Answers), maxAnswersPerDomain)
+	}
+	// Самые старые типы вытеснены.
+	for _, a := range di.Answers {
+		if a.Qtype == "T0" || a.Qtype == "T1" {
+			t.Fatalf("oldest answer %q must be evicted", a.Qtype)
+		}
 	}
 }

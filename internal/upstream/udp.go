@@ -14,6 +14,7 @@ import (
 type udpResolver struct {
 	addr string
 	c    *dns.Client
+	tcp  *dns.Client
 }
 
 func newUDP(addr string, timeout time.Duration) *udpResolver {
@@ -24,12 +25,28 @@ func newUDP(addr string, timeout time.Duration) *udpResolver {
 			Timeout: timeout,
 			UDPSize: 4096,
 		},
+		tcp: &dns.Client{
+			Net:     "tcp",
+			Timeout: timeout,
+		},
 	}
 }
 
 func (u *udpResolver) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	resp, _, err := u.c.ExchangeContext(ctx, m, u.addr)
-	return resp, err
+	if err != nil {
+		return resp, err
+	}
+	if resp == nil || !resp.Truncated {
+		return resp, nil
+	}
+	// Усечённый ответ бесполезен клиенту (и не кэшируется), поэтому повторяем
+	// запрос по TCP к тому же серверу. Если TCP недоступен, возвращаем
+	// исходный усечённый ответ — не хуже, чем было.
+	if full, _, tcpErr := u.tcp.ExchangeContext(ctx, m, u.addr); tcpErr == nil && full != nil {
+		return full, nil
+	}
+	return resp, nil
 }
 
 func (u *udpResolver) String() string { return "udp://" + u.addr }

@@ -5,9 +5,11 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"sync/atomic"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"github.com/nskforward/dns-guard/internal/rules"
 	"github.com/nskforward/dns-guard/internal/stats"
 	"github.com/nskforward/dns-guard/internal/upstream"
+	"golang.org/x/sync/singleflight"
 )
 
 // exchanger — вышестоящая группа, способная обменяться сообщением.
@@ -45,6 +48,9 @@ type Server struct {
 	cache *cache.Cache
 	stats *stats.Stats
 	log   *slog.Logger
+	// sf дедуплицирует одинаковые одновременные запросы: пока первый запрос
+	// ждёт апстрим, остальные ждут его результат вместо повторного обращения.
+	sf singleflight.Group
 }
 
 // New собирает сервер по конфигурации.
@@ -53,7 +59,7 @@ func New(cfg *config.Config, c *cache.Cache, st *stats.Stats, log *slog.Logger) 
 		log = slog.Default()
 	}
 	if c == nil && cfg.Cache.Enabled {
-		c = cache.New(cfg.Cache.MaxEntries, cfg.Cache.MinTTL, cfg.Cache.MaxTTL)
+		c = cache.New(cfg.Cache.MaxEntries, cfg.Cache.MinTTL, cfg.Cache.MaxTTL, cfg.Cache.NegTTL)
 	}
 	s := &Server{cache: c, stats: st, log: log}
 	nst, err := buildState(cfg, cfg.Timeout(), cfg.Cache.Enabled)
@@ -132,43 +138,72 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if c := s.cache; c != nil && st.cacheEnabled {
 		if msg, origin, ok := c.Get(q, do); ok {
 			msg.Id = r.Id
+			msg.Question = r.Question
 			s.record(q.Name, groupName, true, answerInfo(msg, q.Qtype, origin, true, 0))
 			writeReply(w, r, msg)
 			return
 		}
 	}
 
+	// Одинаковые одновременные промахи (например, ретраи клиента, параллельные
+	// A/AAAA-запросы нескольких клиентов) обслуживает один поход к апстриму.
+	v, _, _ := s.sf.Do(cache.Key(q, do), func() (any, error) {
+		return s.exchange(st, q, do, r, group, groupName), nil
+	})
+	res := v.(*exchangeResult)
+
+	if res.err != nil {
+		s.log.Warn("upstream failed", "name", q.Name, "group", groupName, "err", res.err)
+		s.record(q.Name, groupName, false, errorInfo(q.Qtype, res.err.Error(), res.elapsed))
+		answer(w, r, dns.RcodeServerFailure)
+		return
+	}
+
+	// Каждому ожидающему — своя копия: Id и вопрос клиента, без гонок при
+	// последующей обрезке под размер UDP-ответа.
+	out := res.resp.Copy()
+	out.Id = r.Id
+	out.Question = r.Question
+	s.record(q.Name, groupName, false, answerInfo(out, q.Qtype, res.origin, false, res.elapsed))
+	writeReply(w, r, out)
+}
+
+// exchangeResult — результат одного обращения к апстриму, общий для всех
+// запросов, ожидающих тот же ответ (singleflight).
+type exchangeResult struct {
+	resp    *dns.Msg
+	origin  string
+	elapsed time.Duration
+	err     error
+}
+
+// exchange выполняет запрос к группе апстримов и сохраняет успешный ответ в
+// кэш. Возвращает результат, который далее раздаётся всем ожидающим запросам.
+func (s *Server) exchange(st *state, q dns.Question, do bool, r *dns.Msg, group exchanger, groupName string) *exchangeResult {
 	ctx, cancel := context.WithTimeout(context.Background(), st.budget)
 	defer cancel()
 
 	up := r.Copy()
 	up.RecursionDesired = true
-	exchangeStart := time.Now()
+	// Свой Id для запроса к апстриму — гигиена против коллизий с Id клиента.
+	up.Id = uint16(rand.Uint32())
+
+	start := time.Now()
 	resp, origin, attempts, err := group.Exchange(ctx, up)
-	elapsed := time.Since(exchangeStart)
+	elapsed := time.Since(start)
 	s.recordAttempts(groupName, attempts)
-	if err != nil {
-		s.log.Warn("upstream failed", "name", q.Name, "group", groupName, "err", err)
-		s.record(q.Name, groupName, false, errorInfo(q.Qtype, err.Error(), elapsed))
-		answer(w, r, dns.RcodeServerFailure)
-		return
+	if err == nil && resp == nil {
+		err = errors.New("empty response from upstream")
 	}
-	if resp == nil {
-		s.record(q.Name, groupName, false, errorInfo(q.Qtype, "", elapsed))
-		answer(w, r, dns.RcodeServerFailure)
-		return
+	if err != nil {
+		return &exchangeResult{elapsed: elapsed, err: err}
 	}
 
-	resp.Id = r.Id
-	if len(resp.Question) == 0 {
-		resp.Question = r.Question
-	}
 	applyTTL(resp, st.minTTL, st.maxTTL)
 	if c := s.cache; c != nil && st.cacheEnabled {
-		c.Put(q, resp, origin)
+		c.Put(q, do, resp, origin)
 	}
-	s.record(q.Name, groupName, false, answerInfo(resp, q.Qtype, origin, false, elapsed))
-	writeReply(w, r, resp)
+	return &exchangeResult{resp: resp, origin: origin, elapsed: elapsed}
 }
 
 func (st *state) pick(qname string) (exchanger, string) {

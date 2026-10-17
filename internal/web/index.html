@@ -55,6 +55,9 @@
   .meta-list { display:grid; grid-template-columns:max-content 1fr; gap:4px 16px; margin-top:8px; }
   .meta-list .mk { color:var(--muted); }
   .meta-list .mv { word-break:break-all; }
+  .answer-card { border-top:1px solid var(--line); padding-top:12px; margin-top:12px; }
+  .answer-card:first-child { border-top:none; padding-top:0; margin-top:0; }
+  .answer-card .sub { color:var(--muted); margin-top:10px; }
   tr.group-row { cursor:pointer; }
   tr.group-row:hover td { background:rgba(79,156,249,.08); }
   tr.detail > td { padding:0; background:var(--bg); }
@@ -163,15 +166,6 @@
     </div>
     <div id="m-meta" class="muted" style="margin-top:8px"></div>
     <div id="m-last" style="margin-top:12px"></div>
-    <div id="m-error" class="msg"></div>
-    <div id="m-records-wrap" class="hide">
-      <div class="muted" style="margin-top:12px">Answer</div>
-      <pre id="m-records"></pre>
-    </div>
-    <div id="m-auth-wrap" class="hide">
-      <div class="muted" style="margin-top:12px">Authority (NS)</div>
-      <pre id="m-auth"></pre>
-    </div>
   </div>
 </div>
 
@@ -545,13 +539,9 @@ async function showDomain(name) {
   const modal = document.getElementById('modal');
   document.getElementById('m-title').textContent = name;
   document.getElementById('m-meta').textContent = 'Loading…';
-  document.getElementById('m-last').textContent = '';
-  document.getElementById('m-last').className = '';
-  const err = document.getElementById('m-error');
-  err.className = 'msg';
-  err.textContent = '';
-  document.getElementById('m-records-wrap').classList.add('hide');
-  document.getElementById('m-auth-wrap').classList.add('hide');
+  const box = document.getElementById('m-last');
+  box.innerHTML = '';
+  box.className = '';
   modal.classList.remove('hide');
   try {
     const r = await fetch('/api/domain?name=' + encodeURIComponent(name), {cache:'no-store'});
@@ -559,8 +549,8 @@ async function showDomain(name) {
     renderDomain(await r.json());
   } catch (e) {
     document.getElementById('m-meta').textContent = '';
-    err.className = 'msg err';
-    err.textContent = e.message;
+    box.className = 'msg err';
+    box.textContent = e.message;
   }
 }
 
@@ -572,22 +562,33 @@ function renderDomain(d) {
   const box = document.getElementById('m-last');
   box.innerHTML = '';
   box.className = '';
-  const last = d.last;
-  if (!last) {
+  const answers = d.answers || [];
+  if (!answers.length) {
     box.className = 'muted';
     box.textContent = 'No answer recorded yet.';
     return;
   }
+  answers.forEach(a => box.appendChild(renderAnswer(a)));
+}
 
-  const rcode = document.createElement('div');
+function renderAnswer(last) {
+  const card = document.createElement('div');
+  card.className = 'answer-card';
+
+  const head = document.createElement('div');
+  const type = document.createElement('b');
+  type.textContent = last.qtype || '—';
+  head.appendChild(type);
+  head.appendChild(document.createTextNode(' · Answer: '));
   const cls = last.rcode === 'NOERROR' ? 'rcode-ok' : last.rcode === 'NXDOMAIN' ? 'rcode-warn' : 'rcode-err';
-  rcode.innerHTML = 'Answer: <b class="' + cls + '"></b>';
-  rcode.querySelector('b').textContent = last.rcode === 'NOERROR' ? 'OK' : (last.rcode || '—');
-  box.appendChild(rcode);
+  const rc = document.createElement('b');
+  rc.className = cls;
+  rc.textContent = last.rcode === 'NOERROR' ? 'OK' : (last.rcode || '—');
+  head.appendChild(rc);
+  card.appendChild(head);
 
   const when = last.at ? new Date(last.at).toLocaleString('en-US') : '—';
   const rows = [
-    ['Type', last.qtype || '—'],
     ['Source', last.from_cache ? 'cache' : 'upstream'],
   ];
   if (last.upstream) rows.push(['Upstream', last.upstream]);
@@ -606,33 +607,39 @@ function renderDomain(d) {
     meta.appendChild(kd);
     meta.appendChild(vd);
   });
-  box.appendChild(meta);
+  card.appendChild(meta);
 
-  const err = document.getElementById('m-error');
-  err.className = 'msg';
-  err.textContent = '';
   if (last.error) {
+    const err = document.createElement('div');
     err.className = 'msg err';
     err.textContent = 'Error: ' + last.error;
+    card.appendChild(err);
   }
 
-  const recWrap = document.getElementById('m-records-wrap');
-  const rec = document.getElementById('m-records');
   if (last.records && last.records.length) {
-    rec.textContent = last.records.join('\n');
-    recWrap.classList.remove('hide');
+    card.appendChild(subLabel('Answer'));
+    card.appendChild(preBlock(last.records));
   } else {
-    recWrap.classList.add('hide');
+    card.appendChild(subLabel('Answer: no records (negative response)'));
   }
-
-  const authWrap = document.getElementById('m-auth-wrap');
-  const auth = document.getElementById('m-auth');
   if (last.authority && last.authority.length) {
-    auth.textContent = last.authority.join('\n');
-    authWrap.classList.remove('hide');
-  } else {
-    authWrap.classList.add('hide');
+    card.appendChild(subLabel('Authority (NS)'));
+    card.appendChild(preBlock(last.authority));
   }
+  return card;
+}
+
+function subLabel(text) {
+  const el = document.createElement('div');
+  el.className = 'sub';
+  el.textContent = text;
+  return el;
+}
+
+function preBlock(lines) {
+  const pre = document.createElement('pre');
+  pre.textContent = lines.join('\n');
+  return pre;
 }
 
 function closeModal(ev) {

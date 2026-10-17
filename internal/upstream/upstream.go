@@ -60,8 +60,10 @@ type Attempt struct {
 }
 
 // Group — группа апстримов: список основных и резервных серверов.
-// Резервные используются только при ошибке запроса к основным
-// (фоновая проверка доступности не выполняется).
+// Резервные используются при ошибке запроса к основным, а также когда основной
+// сервер ответил NODATA (NOERROR без записей) на запрос A/AAAA — такой ответ
+// проверяется резервными. Для остальных типов NODATA считается штатным.
+// Фоновая проверка доступности не выполняется.
 type Group struct {
 	Name     string
 	primary  []Resolver
@@ -97,9 +99,15 @@ func NewGroup(name string, g config.Group, timeout time.Duration) (*Group, error
 	return grp, nil
 }
 
-// Exchange отправляет запрос: сначала основные серверы (в ротации),
-// при ошибке всех основных — резервные. Возвращает ответ, адрес ответившего
-// сервера и список всех выполненных попыток (в порядке обхода).
+// Exchange отправляет запрос: сначала основные серверы (в ротации), затем
+// резервные. Резервные используются при ошибке запроса, а также если основной
+// сервер вернул NODATA (NOERROR без записей в Answer) на запрос A/AAAA: такой
+// ответ не принимается сразу, а проверяется резервными серверами. Для прочих
+// типов NODATA возвращается как есть. Если все ответившие серверы дали NODATA,
+// возвращается исходный ответ основного сервера.
+//
+// Возвращает ответ, адрес ответившего сервера и список всех выполненных попыток
+// (в порядке обхода).
 func (g *Group) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, string, []Attempt, error) {
 	servers := append(append([]Resolver{}, g.primary...), g.fallback...)
 	if len(servers) == 0 {
@@ -116,9 +124,14 @@ func (g *Group) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, string, []A
 	}
 	order = append(order, g.fallback...)
 
-	var lastErr error
+	var (
+		lastErr      error
+		nodata       *dns.Msg // первый NODATA от основного сервера
+		nodataOrigin string
+	)
 	attempts := make([]Attempt, 0, len(order))
-	for _, r := range order {
+	for i, r := range order {
+		isFallback := i >= len(g.primary)
 		attemptStart := time.Now()
 		resp, err := r.Exchange(ctx, m)
 		elapsed := time.Since(attemptStart)
@@ -128,12 +141,48 @@ func (g *Group) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, string, []A
 			continue
 		}
 		attempts = append(attempts, Attempt{Upstream: r.String(), Elapsed: elapsed})
+		if nodata == nil && isNoData(resp) && !isFallback && len(g.fallback) > 0 && shouldVerifyNoData(m) {
+			// NODATA от основного сервера может быть его ошибкой — проверяем
+			// резервными (и остальными основными до них). Проверяем только
+			// A/AAAA: для остальных типов NODATA — обычное дело.
+			nodata, nodataOrigin = resp, r.String()
+			continue
+		}
+		if nodata != nil && isNoData(resp) {
+			// Проверяющий сервер тоже ответил NODATA — ищем дальше.
+			continue
+		}
 		return resp, r.String(), attempts, nil
+	}
+	if nodata != nil {
+		return nodata, nodataOrigin, attempts, nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("all upstreams failed")
 	}
 	return nil, "", attempts, lastErr
+}
+
+// isNoData сообщает, что ответ не содержит записей (NODATA): NOERROR и пустая
+// секция Answer.
+func isNoData(m *dns.Msg) bool {
+	return m != nil && m.Rcode == dns.RcodeSuccess && len(m.Answer) == 0
+}
+
+// shouldVerifyNoData сообщает, нужно ли проверять NODATA резервными серверами.
+// Проверка выполняется только для адресных запросов A/AAAA: для остальных типов
+// (например, HTTPS/SVCB) NODATA — штатный ответ, и лишние обращения к резерву
+// только добавляли бы задержку.
+func shouldVerifyNoData(m *dns.Msg) bool {
+	if len(m.Question) != 1 {
+		return false
+	}
+	switch m.Question[0].Qtype {
+	case dns.TypeA, dns.TypeAAAA:
+		return true
+	default:
+		return false
+	}
 }
 
 // Close закрывает все резолверы группы.

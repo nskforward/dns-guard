@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -92,7 +94,7 @@ func newTestServer(st *state, c *cache.Cache, ss *stats.Stats) *Server {
 
 func TestServeDNSMissThenHit(t *testing.T) {
 	fa := &fakeExchanger{resp: aResponse("example.com", 300)}
-	c := cache.New(100, 60, 0)
+	c := cache.New(100, 60, 0, 0)
 	ss := stats.New(0)
 	s := newTestServer(testState(fa, fa, 60), c, ss)
 
@@ -125,15 +127,16 @@ func TestServeDNSMissThenHit(t *testing.T) {
 
 	// Последний ответ по домену сохранён (второй запрос обслужен из кэша).
 	info, ok := ss.DomainInfo("example.com")
-	if !ok || info.Last == nil {
+	if !ok || len(info.Answers) != 1 {
 		t.Fatalf("last answer not recorded: %+v", info)
 	}
-	if info.Last.Rcode != "NOERROR" || !info.Last.FromCache || len(info.Last.Records) != 1 {
-		t.Fatalf("last = %+v", info.Last)
+	last := info.Answers[0]
+	if last.Rcode != "NOERROR" || !last.FromCache || len(last.Records) != 1 {
+		t.Fatalf("last = %+v", last)
 	}
 	// Даже для ответа из кэша сохраняется исходный апстрим.
-	if info.Last.Upstream != "fake" {
-		t.Fatalf("cached last upstream = %q, want fake", info.Last.Upstream)
+	if last.Upstream != "fake" {
+		t.Fatalf("cached last upstream = %q, want fake", last.Upstream)
 	}
 
 	// Попытка к апстриму учтена ровно один раз (второй запрос — из кэша).
@@ -149,9 +152,66 @@ func TestServeDNSMissThenHit(t *testing.T) {
 	}
 }
 
+// slowExchanger — exchanger, блокирующий ответ до close(release), с
+// потокобезопасным счётчиком обращений.
+type slowExchanger struct {
+	release chan struct{}
+	calls   atomic.Int32
+	resp    *dns.Msg
+}
+
+func (f *slowExchanger) Exchange(_ context.Context, _ *dns.Msg) (*dns.Msg, string, []upstream.Attempt, error) {
+	f.calls.Add(1)
+	<-f.release
+	return f.resp.Copy(), "fake", []upstream.Attempt{{Upstream: "fake", Elapsed: time.Millisecond}}, nil
+}
+
+func (f *slowExchanger) Close() error { return nil }
+
+// TestServeDNSCoalescesConcurrentQueries проверяет singleflight: одинаковые
+// одновременные промахи обслуживаются одним обращением к апстриму.
+func TestServeDNSCoalescesConcurrentQueries(t *testing.T) {
+	fe := &slowExchanger{release: make(chan struct{}), resp: aResponse("example.com", 300)}
+	s := newTestServer(testState(fe, fe, 60), cache.New(100, 60, 0, 0), stats.New(0))
+
+	const n = 2
+	writers := make([]*mockWriter, n)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		writers[i] = &mockWriter{}
+		wg.Add(1)
+		go func(w *mockWriter) {
+			defer wg.Done()
+			<-start
+			s.ServeDNS(w, query("example.com", dns.TypeA))
+		}(writers[i])
+	}
+	close(start)
+
+	// Ждём первого обращения к апстриму, затем даём остальным присоединиться
+	// к полёту и отпускаем апстрим.
+	deadline := time.Now().Add(2 * time.Second)
+	for fe.calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(fe.release)
+	wg.Wait()
+
+	if got := fe.calls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (singleflight)", got)
+	}
+	for i, w := range writers {
+		if w.msg == nil || len(w.msg.Answer) != 1 {
+			t.Fatalf("writer %d reply = %+v", i, w.msg)
+		}
+	}
+}
+
 func TestServeDNSAppliesMinTTL(t *testing.T) {
 	fa := &fakeExchanger{resp: aResponse("example.com", 5)}
-	s := newTestServer(testState(fa, fa, 60), cache.New(100, 60, 0), stats.New(0))
+	s := newTestServer(testState(fa, fa, 60), cache.New(100, 60, 0, 0), stats.New(0))
 
 	w := &mockWriter{}
 	s.ServeDNS(w, query("example.com", dns.TypeA))
@@ -163,7 +223,7 @@ func TestServeDNSAppliesMinTTL(t *testing.T) {
 func TestServeDNSRouting(t *testing.T) {
 	fa := &fakeExchanger{resp: aResponse("example.com", 300)}
 	fb := &fakeExchanger{resp: aResponse("example.ru", 300)}
-	s := newTestServer(testState(fa, fb, 60), cache.New(100, 60, 0), stats.New(0))
+	s := newTestServer(testState(fa, fb, 60), cache.New(100, 60, 0, 0), stats.New(0))
 
 	// Зона .ru -> группа b.
 	s.ServeDNS(&mockWriter{}, query("example.ru", dns.TypeA))
@@ -180,7 +240,7 @@ func TestServeDNSRouting(t *testing.T) {
 func TestServeDNSServfailOnUpstreamError(t *testing.T) {
 	fa := &fakeExchanger{err: errors.New("boom")}
 	ss := stats.New(0)
-	s := newTestServer(testState(fa, fa, 60), cache.New(100, 60, 0), ss)
+	s := newTestServer(testState(fa, fa, 60), cache.New(100, 60, 0, 0), ss)
 
 	w := &mockWriter{}
 	s.ServeDNS(w, query("example.com", dns.TypeA))
@@ -241,7 +301,7 @@ func TestTruncationUDPvsTCP(t *testing.T) {
 		resp.Answer = append(resp.Answer, rr)
 	}
 	fa := &fakeExchanger{resp: resp}
-	s := newTestServer(testState(fa, fa, 0), cache.New(100, 0, 0), stats.New(0))
+	s := newTestServer(testState(fa, fa, 0), cache.New(100, 0, 0, 0), stats.New(0))
 
 	// UDP без EDNS: обрезаем до 512 с TC=1.
 	wu := &mockWriter{}
