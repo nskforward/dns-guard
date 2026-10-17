@@ -55,13 +55,9 @@ type Server struct {
 	// ждёт апстрим, остальные ждут его результат вместо повторного обращения.
 	sf singleflight.Group
 
-	// ECS: текущие подсети (статические или определённые автоматически),
-	// статический фолбэк и управление фоновым автоопределением.
-	ecsMu     sync.RWMutex
-	ecsNets   ecsNets
-	ecsStatic ecsNets
-	ecsGen    atomic.Uint64 // защита от записи результата устаревшего детектора
-	ecsCancel context.CancelFunc
+	// ECS: текущие подсети из конфигурации.
+	ecsMu   sync.RWMutex
+	ecsNets ecsNets
 }
 
 // New собирает сервер по конфигурации.

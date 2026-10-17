@@ -71,32 +71,6 @@ type ECS struct {
 	Subnet string `yaml:"subnet,omitempty"`
 	// IPv6Subnet — публичный IPv6-префикс; нормализуется до /56.
 	IPv6Subnet string `yaml:"ipv6_subnet,omitempty"`
-	// Autodetect — периодическое определение публичного адреса по HTTP.
-	// Успешный результат приоритетнее статических subnet/ipv6_subnet.
-	Autodetect ECSAutodetect `yaml:"autodetect,omitempty"`
-}
-
-// ECSAutodetect — источники публичного адреса для ECS.
-type ECSAutodetect struct {
-	// URL — сервис, возвращающий публичный IPv4 в виде текста
-	// (например, https://api.ipify.org).
-	URL string `yaml:"url,omitempty"`
-	// URL6 — сервис, возвращающий публичный IPv6 (например, https://api6.ipify.org).
-	URL6 string `yaml:"url6,omitempty"`
-	// Interval — период обновления (duration); по умолчанию 10m, минимум 1m.
-	Interval string `yaml:"interval,omitempty"`
-}
-
-// AutodetectInterval возвращает период автоопределения публичного адреса.
-func (e ECS) AutodetectInterval() time.Duration {
-	if e.Autodetect.Interval == "" {
-		return 10 * time.Minute
-	}
-	d, err := time.ParseDuration(e.Autodetect.Interval)
-	if err != nil || d < time.Minute {
-		return 10 * time.Minute
-	}
-	return d
 }
 
 // ParseECSNet разбирает CIDR-подсеть и обрезает префикс до рекомендуемого
@@ -271,9 +245,6 @@ func (c *Config) normalize() {
 	}
 	c.ECS.Subnet = strings.TrimSpace(c.ECS.Subnet)
 	c.ECS.IPv6Subnet = strings.TrimSpace(c.ECS.IPv6Subnet)
-	c.ECS.Autodetect.URL = strings.TrimSpace(c.ECS.Autodetect.URL)
-	c.ECS.Autodetect.URL6 = strings.TrimSpace(c.ECS.Autodetect.URL6)
-	c.ECS.Autodetect.Interval = strings.TrimSpace(c.ECS.Autodetect.Interval)
 	if c.Cache.MaxEntries <= 0 {
 		c.Cache.MaxEntries = 10000
 	}
@@ -362,29 +333,11 @@ func (c *Config) validateECS() error {
 			return fmt.Errorf("ecs.ipv6_subnet: %w", err)
 		}
 	}
-	for name, u := range map[string]string{
-		"ecs.autodetect.url":  c.ECS.Autodetect.URL,
-		"ecs.autodetect.url6": c.ECS.Autodetect.URL6,
-	} {
-		if u == "" {
-			continue
-		}
-		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
-			return fmt.Errorf("%s: must be an http(s) URL: %q", name, u)
-		}
-	}
 	if !c.ECS.Enabled {
 		return nil
 	}
-	if c.ECS.Subnet == "" && c.ECS.IPv6Subnet == "" &&
-		c.ECS.Autodetect.URL == "" && c.ECS.Autodetect.URL6 == "" {
-		return fmt.Errorf("ecs: enabled but neither subnet nor autodetect.url is set")
-	}
-	if c.ECS.Autodetect.Interval != "" {
-		d, err := time.ParseDuration(c.ECS.Autodetect.Interval)
-		if err != nil || d < time.Minute {
-			return fmt.Errorf("ecs.autodetect.interval: want duration >= 1m, got %q", c.ECS.Autodetect.Interval)
-		}
+	if c.ECS.Subnet == "" && c.ECS.IPv6Subnet == "" {
+		return fmt.Errorf("ecs: enabled but neither subnet nor ipv6_subnet is set")
 	}
 	return nil
 }

@@ -226,8 +226,6 @@ ecs:
   enabled: true
   subnet: "203.0.113.77/32"
   ipv6_subnet: "2001:db8:1234:5678::1/64"
-  autodetect:
-    interval: 5m
 groups:
   g1: {primary: ["1.1.1.1"]}
 default_group: g1
@@ -241,9 +239,6 @@ default_group: g1
 	}
 	if v6 == nil || v6.String() != "2001:db8:1234:5600::/56" {
 		t.Fatalf("v6 subnet = %v, want 2001:db8:1234:5600::/56", v6)
-	}
-	if got := cfg.ECS.AutodetectInterval().String(); got != "5m0s" {
-		t.Fatalf("interval = %s, want 5m0s", got)
 	}
 }
 
@@ -269,18 +264,6 @@ default_group: g1
 `,
 		"v4 in v6 field": `
 ecs: {enabled: true, ipv6_subnet: "203.0.113.0/24"}
-groups:
-  g1: {primary: ["1.1.1.1"]}
-default_group: g1
-`,
-		"bad autodetect url": `
-ecs: {enabled: true, autodetect: {url: "ipify.org"}}
-groups:
-  g1: {primary: ["1.1.1.1"]}
-default_group: g1
-`,
-		"too short interval": `
-ecs: {enabled: true, autodetect: {url: "https://api.ipify.org", interval: 5s}}
 groups:
   g1: {primary: ["1.1.1.1"]}
 default_group: g1

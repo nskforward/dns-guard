@@ -1,12 +1,8 @@
 package server
 
 import (
-	"context"
-	"io"
 	"log/slog"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -205,71 +201,6 @@ func TestServeDNSECSDisabled(t *testing.T) {
 	s.ServeDNS(&mockWriter{}, query("example.com", dns.TypeA))
 	if opts := ecsOptions(fa.last); len(opts) != 0 {
 		t.Fatalf("ecs disabled: unexpected ecs %+v", opts)
-	}
-}
-
-func TestDetectOnceUpdatesSubnetAndFlushesCache(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, "198.51.100.7\n")
-	}))
-	defer ts.Close()
-
-	c := cache.New(100, 60, 0, 0)
-	q := query("example.com", dns.TypeA)
-	c.Put(q.Question[0], false, aResponse("example.com", 300), "upstream")
-
-	s := &Server{log: slog.Default(), cache: c}
-	s.ecsGen.Store(1)
-	s.detectOnce(context.Background(), config.ECS{
-		Enabled:    true,
-		Autodetect: config.ECSAutodetect{URL: ts.URL},
-	}, 1)
-
-	s.ecsMu.RLock()
-	got := netString(s.ecsNets.v4)
-	s.ecsMu.RUnlock()
-	if got != "198.51.100.0/24" {
-		t.Fatalf("detected subnet = %q, want 198.51.100.0/24", got)
-	}
-	if c.Len() != 0 {
-		t.Fatalf("cache len = %d, want 0 (flush on subnet change)", c.Len())
-	}
-}
-
-func TestDetectOnceStaleGeneration(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, "198.51.100.7")
-	}))
-	defer ts.Close()
-
-	s := &Server{log: slog.Default()}
-	s.ecsGen.Store(2)
-	s.detectOnce(context.Background(), config.ECS{Autodetect: config.ECSAutodetect{URL: ts.URL}}, 1)
-
-	s.ecsMu.RLock()
-	defer s.ecsMu.RUnlock()
-	if s.ecsNets.v4 != nil {
-		t.Fatalf("stale detector applied subnet %s", s.ecsNets.v4)
-	}
-}
-
-func TestDetectOnceKeepsStaticOnError(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "nope", http.StatusInternalServerError)
-	}))
-	defer ts.Close()
-
-	s := &Server{log: slog.Default()}
-	s.ecsGen.Store(1)
-	s.ecsStatic = ecsNets{v4: mustCIDR(t, "203.0.113.0/24")}
-	s.ecsNets = s.ecsStatic
-
-	s.detectOnce(context.Background(), config.ECS{Autodetect: config.ECSAutodetect{URL: ts.URL}}, 1)
-
-	s.ecsMu.RLock()
-	defer s.ecsMu.RUnlock()
-	if netString(s.ecsNets.v4) != "203.0.113.0/24" {
-		t.Fatalf("static fallback lost: %v", s.ecsNets.v4)
 	}
 }
 
