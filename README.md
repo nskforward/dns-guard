@@ -27,8 +27,8 @@ MIN/MAX-TTL, кэширует ответы в памяти и показывае
 - Автоматический повтор усечённого (TC) UDP-ответа апстрима по TCP.
 - EDNS Client Subnet (RFC 7871): передача вышестоящим серверам нашей публичной
   подсети, чтобы гео-зависимые CDN возвращали адреса, близкие к нам, а не к
-  локации удалённого резолвера. С автоопределением публичного IP и отдельным
-  отключением для групп, которые должны резолвиться «оттуда» (VPN).
+  локации удалённого резолвера. Публичная подсеть задаётся в конфиге; для групп,
+  которые должны резолвиться «оттуда» (VPN), ECS можно отключить отдельно.
 - Горячая перезагрузка конфигурации (SIGHUP или через веб-UI), без простоя.
 - Веб-UI (на английском) и REST API: статистика по полным доменам с пиковым
   RPM, поиск, пагинация и сводные сведения по домену — успешные записи,
@@ -192,7 +192,8 @@ groups:
   включите на нём проброс ECS к авторитативным серверам, иначе он проигнорирует
   опцию: для unbound — сборка с `--enable-subnet`, `module-config:
   "subnetcache validator iterator"`, `client-subnet-always-forward: yes`; для
-  Knot Resolver — модуль `subnet`.
+  Knot Resolver — модуль `subnet`. Готовый пример — в разделе
+  «Собственный upstream на VPS: nginx + unbound».
 - ECS поддерживают не все публичные резолверы: Google (`8.8.8.8`, `dns.google`),
   OpenDNS, Quad9 в варианте `9.9.9.11` — да; Cloudflare `1.1.1.1` — нет. Если
   ECS-совместимого upstream нет, используйте маршрутизацию зон на ближайший
@@ -206,6 +207,227 @@ groups:
 # Google эхом возвращает увиденную подсеть в TXT-ответе:
 dig @127.0.0.1 o-o.myaddr.l.google.com TXT
 ```
+
+## Собственный upstream на VPS: nginx + unbound
+
+Публичные резолверы по-разному относятся к ECS: Cloudflare `1.1.1.1` опцию
+игнорирует, Google поддерживает, но применяет свои правила. Собственный
+recursor на VPS даёт полный контроль над ECS и кэшем. Рабочая схема:
+
+```
+dns-guard --DoH/TLS--> nginx :8443 --> doh-proxy :8053 --> unbound :53 --> авторитативные серверы
+```
+
+- nginx терминирует TLS и прячет endpoint за секретным путём;
+- doh-proxy (`doh-server`) превращает DoH в обычный DNS для unbound;
+- unbound рекурсивно резолвит и пробрасывает ECS авторитативным серверам.
+
+Пример для Ubuntu 24.04 / Debian 12.
+
+### 1. Пакеты
+
+```sh
+apt install -y unbound nginx
+unbound -V | grep -o subnetcache   # ECS-модуль должен быть в сборке
+```
+
+Пакеты Debian/Ubuntu собраны с `--enable-subnet`, поэтому `subnetcache` есть.
+
+### 2. unbound
+
+`/etc/unbound/unbound.conf.d/dns-guard.conf`:
+
+```yaml
+server:
+    # Слушаем только localhost: снаружи доступ лишь через nginx + doh-proxy.
+    interface: 127.0.0.1
+    access-control: 127.0.0.0/8 allow
+    access-control: 0.0.0.0/0 refuse
+
+    do-ip4: yes
+    do-ip6: no
+    do-udp: yes
+    do-tcp: yes
+
+    qname-minimisation: yes
+    prefetch: yes
+    harden-glue: yes
+    harden-dnssec-stripped: yes
+    hide-identity: yes
+    hide-version: yes
+    do-not-query-localhost: yes
+
+    msg-cache-size: 32m
+    rrset-cache-size: 64m
+
+    # ECS (RFC 7871): принимаем подсеть от dns-guard и передаём её
+    # авторитативным серверам, кэшируя ответы по подсетям.
+    module-config: "subnetcache validator iterator"
+    client-subnet-always-forward: yes
+    max-client-subnet-ipv4: 24
+    max-client-subnet-ipv6: 56
+```
+
+```sh
+unbound-checkconf
+systemctl restart unbound
+```
+
+- `module-config` с `subnetcache` обязателен: без модуля unbound молча
+  отбрасывает входящую ECS-опцию. В сборках с ECS он стоит по умолчанию, но
+  явная строка защищает от смены дефолта.
+- `client-subnet-always-forward: yes` — ключевой параметр: без него unbound
+  пересылает ECS только авторитативным адресам из `send-client-subnet`, то есть
+  по умолчанию никому. С `yes` присланная dns-guard подсеть уходит любым
+  авторитативным серверам.
+- Ответы с ECS кэшируются отдельно по подсетям (обычный кэш для них
+  пропускается) — это ожидаемо и обеспечивает корректную геолокацию.
+- `max-client-subnet-ipv4/ipv6` ограничивают длину префикса; dns-guard и так
+  нормализует её до `/24` и `/56`.
+- DNSSEC-якорь (`auto-trust-anchor-file`) в Debian/Ubuntu уже настроен пакетом
+  отдельным файлом в `unbound.conf.d/`, добавлять его в этот конфиг не нужно.
+- `prefetch` не работает для записей subnet-кэша: unbound пишет об этом
+  warning при старте — это ожидаемо.
+
+### 3. doh-proxy
+
+Готовый бинарь `doh-server` (Rust) берём из релизов
+<https://github.com/jedisct1/doh-server/releases> (linux-amd64/arm64):
+
+```sh
+install -m 0755 doh-server /usr/bin/doh-proxy
+```
+
+`/etc/systemd/system/doh-proxy.service`:
+
+```ini
+[Unit]
+Description=DoH proxy (doh-server) in front of unbound
+After=network.target unbound.service
+Wants=unbound.service
+
+[Service]
+ExecStart=/usr/bin/doh-proxy -H dns.example.com -u 127.0.0.1:53 -l 127.0.0.1:8053
+Restart=on-failure
+RestartSec=2s
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+systemctl daemon-reload
+systemctl enable --now doh-proxy
+```
+
+`-H` — ожидаемый `Host` (защита от обращения по чужому имени), `-u` — адрес
+unbound, `-l` — локальный HTTP-порт для nginx. Порт 8053 наружу не публикуем.
+
+### 4. nginx
+
+Сертификат — обычный Let's Encrypt (HTTP-01 требует открытый `:80`):
+
+```sh
+certbot certonly --nginx -d dns.example.com
+```
+
+`/etc/nginx/sites-enabled/dns-guard`:
+
+```nginx
+limit_req_zone $binary_remote_addr zone=doh:10m rate=100r/s;
+
+server {
+    listen 8443 ssl http2;
+    listen [::]:8443 ssl http2;
+    server_name dns.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/dns.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/dns.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Секретный путь: endpoint не находится перебором.
+    location = /<секрет>/dns-query {
+        limit_req zone=doh burst=200 nodelay;
+
+        proxy_pass http://127.0.0.1:8053/dns-query;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location / { return 404; }
+}
+```
+
+```sh
+nginx -t && systemctl reload nginx
+```
+
+### 5. Группа в dns-guard
+
+```yaml
+ecs:
+  enabled: true
+  subnet: "203.0.113.0/24"
+
+groups:
+  vps:
+    protocol: doh
+    primary:
+      - https://dns.example.com:8443/<секрет>/dns-query
+    fallback:
+      - https://9.9.9.9/dns-query
+    # hosts: {"dns.example.com": "203.0.113.10"}  # если DNS до VPS недоступен
+
+default_group: vps
+```
+
+nginx и doh-proxy не разбирают DNS-сообщение, поэтому ECS-опция, добавленная
+dns-guard, доходит до unbound, а он передаёт её дальше. Сертификат проверяется
+по хостнейму из URL, поэтому `hosts` (если нужен) задаёт только IP.
+
+### 6. Проверка
+
+На VPS, напрямую в unbound (Akamai возвращает увиденную подсеть в TXT):
+
+```sh
+dig @127.0.0.1 whoami.ds.akahelp.net TXT +short +subnet=203.0.113.0/24
+# "ecs" "203.0.113.0/24/24"
+```
+
+Через всю цепочку и dns-guard (подсеть берётся из `ecs.subnet`):
+
+```sh
+dig @192.168.88.1 whoami.ds.akahelp.net TXT +short
+# "ecs" "203.0.113.0/24/24"
+```
+
+Если строки `"ecs"` нет — unbound не пробрасывает опцию: проверьте
+`client-subnet-always-forward: yes` и `unbound-checkconf -o module-config`.
+
+При проверке через роутер MikroTik не забудьте `/ip/dns/cache/flush`:
+RouterOS кэширует ответы без учёта ECS и иначе отдаст старый ответ, полученный
+до включения подсети.
+
+### 7. Эксплуатация
+
+- Наружу открыты только `8443` (DoH) и `80` (ACME); unbound и doh-proxy слушают
+  localhost.
+- Секретный путь в URL + TLS — минимальная защита от случайного использования
+  резолвера. Дополнительно можно ограничить доступ в nginx через `allow`.
+- При продлении сертификата перезагружайте nginx (`deploy-hook` у certbot).
+- Не публикуйте unbound в интернет: открытый рекурсивный резолвер быстро
+  становится участником DNS-амплификации.
 
 ## REST API
 
