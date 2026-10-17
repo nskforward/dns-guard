@@ -19,6 +19,9 @@
   .card .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
   .card .v { font-size:22px; font-weight:600; margin-top:6px; }
   .card .v.warn { color:var(--warn); }
+  .card.clickable { cursor:pointer; }
+  .card.clickable:hover { border-color:var(--accent); }
+  .card.clickable .k::after { content:" ↗"; color:var(--muted); }
   table { width:100%; border-collapse:collapse; margin-top:20px; background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
   th,td { text-align:left; padding:8px 12px; border-bottom:1px solid var(--line); }
   th { color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
@@ -64,6 +67,7 @@
   <h1>dns-guard</h1>
   <nav>
     <button id="tab-dash" class="active" onclick="showTab('dash')">Stats</button>
+    <button id="tab-sf" onclick="showTab('sf')">SERVFAIL</button>
     <button id="tab-up" onclick="showTab('up')">Upstreams</button>
     <button id="tab-cfg" onclick="showTab('cfg')">Config</button>
   </nav>
@@ -76,7 +80,7 @@
       <div class="card"><div class="k">Cache hits</div><div class="v" id="c-hits">—</div></div>
       <div class="card"><div class="k">Misses</div><div class="v" id="c-misses">—</div></div>
       <div class="card"><div class="k">Hit rate</div><div class="v" id="c-rate">—</div></div>
-      <div class="card"><div class="k">SERVFAIL</div><div class="v" id="c-servfail">—</div></div>
+      <div class="card clickable" onclick="showTab('sf')" title="Show SERVFAIL details"><div class="k">SERVFAIL</div><div class="v" id="c-servfail">—</div></div>
       <div class="card"><div class="k">Domains</div><div class="v" id="c-domains">—</div></div>
       <div class="card"><div class="k">Cache entries</div><div class="v" id="c-cache">—</div></div>
       <div class="card"><div class="k">Uptime</div><div class="v" id="c-uptime">—</div></div>
@@ -98,6 +102,30 @@
       <tbody id="top"></tbody>
     </table>
     <div id="pager" class="pager"></div>
+  </section>
+
+  <section id="view-sf" class="hide">
+    <div class="row" style="margin-top:0">
+      <h3 style="margin:0">SERVFAIL by domain</h3>
+      <span id="sf-total" class="muted"></span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <span class="muted">Click a domain to see its last answer.</span>
+    </div>
+    <table>
+      <thead><tr><th>#</th><th>Domain</th><th class="num">SERVFAIL</th><th class="num">Share</th><th>Last error</th><th>Last time</th></tr></thead>
+      <tbody id="sf-domains"></tbody>
+    </table>
+    <div id="sf-pager" class="pager"></div>
+
+    <div class="row">
+      <h3 style="margin:0">Recent events</h3>
+      <span id="sf-recent-total" class="muted"></span>
+    </div>
+    <table>
+      <thead><tr><th>Time</th><th>Domain</th><th>Type</th><th>Group</th><th>Upstream</th><th>Source</th><th>Error</th></tr></thead>
+      <tbody id="sf-events"></tbody>
+    </table>
   </section>
 
   <section id="view-up" class="hide">
@@ -150,20 +178,24 @@ let activeTab = 'dash';
 let page = 1;
 let search = '';
 let pages = 0;
+let sfPage = 1;
+let sfPages = 0;
 let expandedGroups = new Set();
 const PAGE_SIZE = 50;
 
 function showTab(which) {
   activeTab = which;
   document.getElementById('view-dash').classList.toggle('hide', which !== 'dash');
+  document.getElementById('view-sf').classList.toggle('hide', which !== 'sf');
   document.getElementById('view-up').classList.toggle('hide', which !== 'up');
   document.getElementById('view-cfg').classList.toggle('hide', which !== 'cfg');
   document.getElementById('tab-dash').classList.toggle('active', which === 'dash');
+  document.getElementById('tab-sf').classList.toggle('active', which === 'sf');
   document.getElementById('tab-up').classList.toggle('active', which === 'up');
   document.getElementById('tab-cfg').classList.toggle('active', which === 'cfg');
   if (which === 'cfg') { stopTimer(); loadConfig(); return; }
-  if (which === 'up') { loadUpstreams(); startTimer(); }
-  else { refresh(); startTimer(); }
+  refresh();
+  startTimer();
 }
 
 function startTimer() { stopTimer(); timer = setInterval(refresh, 5000); }
@@ -183,6 +215,7 @@ function uptime(sec) {
 async function refresh() {
   await loadStats();
   if (activeTab === 'dash') await loadDomains();
+  if (activeTab === 'sf') await loadServfail();
   if (activeTab === 'up') await loadUpstreams();
 }
 
@@ -252,9 +285,13 @@ function renderRows(items) {
 }
 
 function renderPager(d) {
-  const pager = document.getElementById('pager');
-  pager.innerHTML = '';
   document.getElementById('domains-total').textContent = d.total ? 'Total: ' + fmt(d.total) : '';
+  buildPager('pager', d, goPage);
+}
+
+function buildPager(id, d, onGo) {
+  const pager = document.getElementById(id);
+  pager.innerHTML = '';
   if (!d.pages) return;
 
   const mk = (label, target, opts = {}) => {
@@ -262,7 +299,7 @@ function renderPager(d) {
     b.textContent = label;
     if (opts.active) b.className = 'active';
     if (opts.disabled) b.disabled = true;
-    else b.addEventListener('click', () => goPage(target));
+    else b.addEventListener('click', () => onGo(target));
     pager.appendChild(b);
   };
   mk('‹', d.page - 1, {disabled: d.page <= 1});
@@ -314,6 +351,108 @@ function resetSearch() {
   search = '';
   page = 1;
   loadDomains();
+}
+
+async function loadServfail() {
+  try {
+    const qs = '?page=' + sfPage + '&limit=' + PAGE_SIZE;
+    const r = await fetch('/api/servfail' + qs, {cache:'no-store'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    sfPage = d.page || 1;
+    sfPages = d.pages || 0;
+    renderServfail(d);
+  } catch (e) {
+    document.getElementById('status').textContent = 'error: ' + e.message;
+  }
+}
+
+function renderServfail(d) {
+  const total = d.total || 0;
+  document.getElementById('sf-total').textContent = total
+    ? fmt(total) + ' SERVFAIL · ' + fmt(d.domains_total || 0) + ' domain(s)'
+    : '';
+  renderServfailDomains(d.domains || [], total);
+  buildPager('sf-pager', d, goSfPage);
+  renderServfailEvents(d.recent || []);
+}
+
+function renderServfailDomains(items, total) {
+  const body = document.getElementById('sf-domains');
+  body.innerHTML = '';
+  if (!items.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 6;
+    td.className = 'muted';
+    td.textContent = 'No SERVFAIL yet';
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  items.forEach((x, i) => {
+    const last = x.last || {};
+    const reason = last.error || (last.upstream ? 'SERVFAIL from upstream' : '—');
+    const when = last.at ? new Date(last.at).toLocaleString('en-US') : '—';
+    const tr = document.createElement('tr');
+    tr.className = 'clickable';
+    tr.title = 'Show last answer';
+    tr.innerHTML =
+      '<td class="muted">' + ((sfPage - 1) * PAGE_SIZE + i + 1) + '</td>' +
+      '<td class="domain"></td>' +
+      '<td class="num">' + fmt(x.count) + '</td>' +
+      '<td class="num">' + pct(x.count, total) + '</td>' +
+      '<td class="domain"></td>' +
+      '<td class="muted"></td>';
+    tr.children[1].textContent = x.domain;
+    tr.children[4].textContent = reason;
+    tr.children[5].textContent = when;
+    tr.addEventListener('click', () => showDomain(x.domain));
+    body.appendChild(tr);
+  });
+}
+
+function renderServfailEvents(items) {
+  const body = document.getElementById('sf-events');
+  body.innerHTML = '';
+  document.getElementById('sf-recent-total').textContent = items.length ? 'Last ' + fmt(items.length) : '';
+  if (!items.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 7;
+    td.className = 'muted';
+    td.textContent = 'No events yet';
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  items.forEach(e => {
+    const when = e.at ? new Date(e.at).toLocaleString('en-US') : '—';
+    const err = e.error || (e.upstream ? 'SERVFAIL from upstream' : '—');
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td class="muted"></td>' +
+      '<td class="domain"></td>' +
+      '<td></td>' +
+      '<td></td>' +
+      '<td class="domain"></td>' +
+      '<td></td>' +
+      '<td class="domain"></td>';
+    tr.children[0].textContent = when;
+    tr.children[1].textContent = e.domain || '—';
+    tr.children[2].textContent = e.qtype || '—';
+    tr.children[3].textContent = e.group || '—';
+    tr.children[4].textContent = e.upstream || '—';
+    tr.children[5].textContent = e.from_cache ? 'cache' : 'upstream';
+    tr.children[6].textContent = err;
+    body.appendChild(tr);
+  });
+}
+
+function goSfPage(p) {
+  if (p < 1 || (sfPages && p > sfPages)) return;
+  sfPage = p;
+  loadServfail();
 }
 
 async function loadUpstreams() {

@@ -229,6 +229,124 @@ func TestMaxDomainsLimit(t *testing.T) {
 	}
 }
 
+func TestServfailPage(t *testing.T) {
+	now := time.Unix(1000, 0)
+	s := newWithClock(0, func() time.Time { return now })
+
+	s.Record("a.test.", "g1", false, info("NOERROR"))
+	now = time.Unix(1010, 0)
+	s.Record("a.test.", "g1", false, &AnswerInfo{
+		Rcode:    "SERVFAIL",
+		Qtype:    "A",
+		Error:    "timeout",
+		Upstream: "1.1.1.1:53",
+	})
+	now = time.Unix(1020, 0)
+	s.Record("a.test.", "g1", false, &AnswerInfo{
+		Rcode: "SERVFAIL",
+		Qtype: "AAAA",
+		Error: "boom",
+	})
+	now = time.Unix(1030, 0)
+	s.Record("b.test.", "g2", true, &AnswerInfo{
+		Rcode:     "SERVFAIL",
+		Qtype:     "A",
+		Upstream:  "8.8.8.8:53",
+		FromCache: true,
+	})
+	s.Record("c.test.", "g1", false, info("NOERROR"))
+
+	got := s.ServfailPage(1, 0)
+	if got.Total != 3 || got.DomainsTotal != 2 {
+		t.Fatalf("total/domains_total = %d/%d, want 3/2", got.Total, got.DomainsTotal)
+	}
+	if len(got.Domains) != 2 ||
+		got.Domains[0].Domain != "a.test" || got.Domains[0].Count != 2 ||
+		got.Domains[1].Domain != "b.test" || got.Domains[1].Count != 1 {
+		t.Fatalf("domains = %+v", got.Domains)
+	}
+	if got.Domains[0].Last == nil || got.Domains[0].Last.Error != "boom" ||
+		got.Domains[0].Last.Qtype != "AAAA" || !got.Domains[0].Last.At.Equal(time.Unix(1020, 0)) {
+		t.Fatalf("a.test last = %+v", got.Domains[0].Last)
+	}
+	if got.Domains[1].Last == nil || !got.Domains[1].Last.FromCache ||
+		got.Domains[1].Last.Upstream != "8.8.8.8:53" {
+		t.Fatalf("b.test last = %+v", got.Domains[1].Last)
+	}
+
+	// Журнал событий: новые сверху, с группой и текстом ошибки.
+	if len(got.Recent) != 3 {
+		t.Fatalf("recent = %+v", got.Recent)
+	}
+	if got.Recent[0].Domain != "b.test" || got.Recent[0].Group != "g2" || !got.Recent[0].FromCache {
+		t.Fatalf("recent[0] = %+v", got.Recent[0])
+	}
+	if got.Recent[2].Domain != "a.test" || got.Recent[2].Error != "timeout" ||
+		got.Recent[2].Upstream != "1.1.1.1:53" || !got.Recent[2].At.Equal(time.Unix(1010, 0)) {
+		t.Fatalf("recent[2] = %+v", got.Recent[2])
+	}
+}
+
+func TestServfailPagePaginationAndRing(t *testing.T) {
+	now := time.Unix(0, 0)
+	s := newWithClock(0, func() time.Time { return now })
+
+	// 120 доменов, у домена i ровно i+1 SERVFAIL.
+	for i := 0; i < 120; i++ {
+		name := fmt.Sprintf("host%03d.test", i)
+		for j := 0; j <= i; j++ {
+			s.Record(name, "g", false, info("SERVFAIL"))
+		}
+	}
+
+	first := s.ServfailPage(1, 50)
+	if first.Total != 7260 || first.DomainsTotal != 120 || first.Pages != 3 || first.Page != 1 {
+		t.Fatalf("page meta = %+v", first)
+	}
+	if len(first.Domains) != 50 || first.Domains[0].Domain != "host119.test" || first.Domains[0].Count != 120 {
+		t.Fatalf("first item = %+v", first.Domains[0])
+	}
+
+	clamped := s.ServfailPage(99, 50)
+	if clamped.Page != 3 || len(clamped.Domains) != 20 {
+		t.Fatalf("clamped = %+v", clamped)
+	}
+
+	// Кольцевой буфер ограничен servfailEventsCap, новые события сверху.
+	s2 := newWithClock(0, func() time.Time { return now })
+	for i := 0; i < 150; i++ {
+		s2.Record(fmt.Sprintf("e%03d.test", i), "g", false, info("SERVFAIL"))
+	}
+	recent := s2.ServfailPage(1, 50).Recent
+	if len(recent) != servfailEventsCap {
+		t.Fatalf("recent len = %d, want %d", len(recent), servfailEventsCap)
+	}
+	if recent[0].Domain != "e149.test" {
+		t.Fatalf("newest event = %+v", recent[0])
+	}
+	if recent[len(recent)-1].Domain != "e050.test" {
+		t.Fatalf("oldest kept event = %+v", recent[len(recent)-1])
+	}
+}
+
+func TestServfailBeyondDomainLimit(t *testing.T) {
+	s := newWithClock(1, func() time.Time { return time.Unix(0, 0) })
+	s.Record("a.test.", "g", false, info("SERVFAIL"))
+	s.Record("b.test.", "g", false, info("SERVFAIL"))
+
+	snap := s.Snapshot()
+	if snap.Servfail != 2 || snap.Domains != 1 {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+	got := s.ServfailPage(1, 0)
+	if got.Total != 2 || got.DomainsTotal != 1 {
+		t.Fatalf("page = %+v", got)
+	}
+	if len(got.Recent) != 2 || got.Recent[0].Domain != "b.test" {
+		t.Fatalf("recent = %+v", got.Recent)
+	}
+}
+
 func TestDomainInfoLastAnswer(t *testing.T) {
 	now := time.Unix(100, 0)
 	s := newWithClock(0, func() time.Time { return now })

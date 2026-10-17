@@ -47,6 +47,7 @@ func New(d Deps) *Server {
 	s.mux.HandleFunc("/api/domains", s.handleDomains)
 	s.mux.HandleFunc("/api/domain", s.handleDomain)
 	s.mux.HandleFunc("/api/upstreams", s.handleUpstreams)
+	s.mux.HandleFunc("/api/servfail", s.handleServfail)
 	s.mux.HandleFunc("/api/config", s.handleConfig)
 	s.mux.HandleFunc("/api/cache/flush", s.handleFlush)
 	return s
@@ -139,6 +140,33 @@ func (s *Server) handleUpstreams(w http.ResponseWriter, r *http.Request) {
 		items = s.deps.Stats.UpstreamsPage()
 	}
 	writeJSON(w, http.StatusOK, map[string][]stats.GroupStat{"items": items})
+}
+
+// handleServfail отдаёт детали SERVFAIL: домены с последней ошибкой и журнал
+// последних событий:
+// GET /api/servfail?page=1&limit=50
+func (s *Server) handleServfail(w http.ResponseWriter, r *http.Request) {
+	page := queryInt(r, "page", 1)
+	size := queryInt(r, "limit", stats.DefaultPageSize)
+	if s.deps.Stats == nil {
+		if size <= 0 {
+			size = stats.DefaultPageSize
+		}
+		if size > stats.MaxPageSize {
+			size = stats.MaxPageSize
+		}
+		if page < 1 {
+			page = 1
+		}
+		writeJSON(w, http.StatusOK, stats.ServfailPage{
+			Page:    page,
+			Size:    size,
+			Domains: []stats.ServfailDomain{},
+			Recent:  []stats.ServfailEvent{},
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.deps.Stats.ServfailPage(page, size))
 }
 
 // queryInt разбирает целочисленный query-параметр, возвращая def при ошибке.

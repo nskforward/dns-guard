@@ -101,6 +101,63 @@ func TestUpstreamsAPI(t *testing.T) {
 	}
 }
 
+func TestServfailAPI(t *testing.T) {
+	st := stats.New(0)
+	st.Record("a.example.com.", "g1", false, &stats.AnswerInfo{
+		Rcode:    "SERVFAIL",
+		Qtype:    "A",
+		Error:    "timeout",
+		Upstream: "1.1.1.1:53",
+	})
+	st.Record("a.example.com.", "g1", true, &stats.AnswerInfo{
+		Rcode:     "SERVFAIL",
+		Qtype:     "AAAA",
+		FromCache: true,
+	})
+	st.Record("b.example.com.", "g2", false, &stats.AnswerInfo{
+		Rcode: "NOERROR",
+		Qtype: "A",
+	})
+
+	h := New(Deps{Stats: st}).Handler()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/servfail?page=1&limit=10", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var page stats.ServfailPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if page.Total != 2 || page.DomainsTotal != 1 || len(page.Domains) != 1 {
+		t.Fatalf("page = %+v", page)
+	}
+	d := page.Domains[0]
+	if d.Domain != "a.example.com" || d.Count != 2 || d.Last == nil || !d.Last.FromCache {
+		t.Fatalf("domain = %+v", d)
+	}
+	if len(page.Recent) != 2 || page.Recent[0].Group != "g1" || !page.Recent[0].FromCache {
+		t.Fatalf("recent = %+v", page.Recent)
+	}
+	if page.Recent[1].Error != "timeout" || page.Recent[1].Upstream != "1.1.1.1:53" {
+		t.Fatalf("recent[1] = %+v", page.Recent[1])
+	}
+
+	// Без сборщика статистики — пустой корректный ответ.
+	rec = httptest.NewRecorder()
+	New(Deps{}).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/servfail", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("nil stats status = %d", rec.Code)
+	}
+	var empty stats.ServfailPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &empty); err != nil {
+		t.Fatalf("decode empty: %v", err)
+	}
+	if empty.Page != 1 || empty.Size != stats.DefaultPageSize || len(empty.Domains) != 0 {
+		t.Fatalf("empty = %+v", empty)
+	}
+}
+
 func TestStatsAPIWithoutTop(t *testing.T) {
 	st := stats.New(0)
 	st.Record("a.example.com.", "g", false, nil)

@@ -21,6 +21,8 @@ const (
 	DefaultPageSize = 50
 	// MaxPageSize — максимально допустимый размер страницы.
 	MaxPageSize = 500
+	// servfailEventsCap — сколько последних SERVFAIL-событий хранить в журнале.
+	servfailEventsCap = 100
 )
 
 // DomainStat — статистика по полному доменному имени.
@@ -67,6 +69,39 @@ type GroupStat struct {
 	Upstreams []UpstreamStat `json:"upstreams"`
 }
 
+// ServfailEvent — одно событие SERVFAIL: запрос, на который не удалось получить
+// ответ. Error заполнен при транспортной ошибке апстримов, Upstream — при
+// SERVFAIL, полученном от самого сервера или из кэша.
+type ServfailEvent struct {
+	At        time.Time `json:"at"`
+	Domain    string    `json:"domain"`
+	Qtype     string    `json:"qtype"`
+	Group     string    `json:"group,omitempty"`
+	Upstream  string    `json:"upstream,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	FromCache bool      `json:"from_cache"`
+}
+
+// ServfailDomain — домен с числом SERVFAIL и сведениями о последней ошибке.
+type ServfailDomain struct {
+	Domain string      `json:"domain"`
+	Count  uint64      `json:"count"`
+	Last   *AnswerInfo `json:"last,omitempty"`
+}
+
+// ServfailPage — домены с SERVFAIL (после сортировки и пагинации) и журнал
+// последних событий. Total — общий счётчик SERVFAIL, DomainsTotal — число
+// доменов, у которых есть хотя бы один SERVFAIL.
+type ServfailPage struct {
+	Total        uint64           `json:"total"`
+	DomainsTotal int              `json:"domains_total"`
+	Page         int              `json:"page"`
+	Pages        int              `json:"pages"`
+	Size         int              `json:"size"`
+	Domains      []ServfailDomain `json:"domains"`
+	Recent       []ServfailEvent  `json:"recent"`
+}
+
 // Snapshot — снимок общих счётчиков на момент вызова.
 type Snapshot struct {
 	Uptime      int64             `json:"uptime_seconds"`
@@ -89,11 +124,13 @@ type DomainsPage struct {
 
 // domain — счётчики одного домена.
 type domain struct {
-	minute int64       // unix/60 минуты последней записи
-	count  uint64      // запросов в текущей минуте
-	peak   uint64      // максимум count за завершённые минуты
-	total  uint64      // всего запросов
-	last   *AnswerInfo // последний выданный ответ
+	minute   int64       // unix/60 минуты последней записи
+	count    uint64      // запросов в текущей минуте
+	peak     uint64      // максимум count за завершённые минуты
+	total    uint64      // всего запросов
+	servfail uint64      // SERVFAIL-ответов
+	last     *AnswerInfo // последний выданный ответ
+	lastFail *AnswerInfo // последний SERVFAIL-ответ
 }
 
 // upstreamCounters — счётчики попыток одного апстрима.
@@ -114,11 +151,12 @@ type Stats struct {
 	cacheMisses atomic.Uint64
 	servfail    atomic.Uint64
 
-	mu        sync.Mutex
-	domains   map[string]*domain
-	groups    map[string]uint64
-	groupHits map[string]uint64
-	ups       map[string]map[string]*upstreamCounters
+	mu             sync.Mutex
+	domains        map[string]*domain
+	groups         map[string]uint64
+	groupHits      map[string]uint64
+	ups            map[string]map[string]*upstreamCounters
+	servfailEvents []ServfailEvent // кольцевой буфер, не больше servfailEventsCap
 }
 
 // New создаёт сборщик статистики. maxDomains <= 0 означает DefaultMaxDomains.
@@ -160,12 +198,14 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 	} else {
 		s.cacheMisses.Add(1)
 	}
-	if info != nil && info.Rcode == "SERVFAIL" {
+	failed := info != nil && info.Rcode == "SERVFAIL"
+	if failed {
 		s.servfail.Add(1)
 	}
 
 	name := normalize(qname)
-	mid := s.now().Unix() / 60
+	at := s.now()
+	mid := at.Unix() / 60
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -178,10 +218,26 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 	if name == "" {
 		return
 	}
+	if failed {
+		// Журнал событий не зависит от лимита доменов: он ведётся и тогда,
+		// когда новые домены уже не попадают в таблицу.
+		if len(s.servfailEvents) >= servfailEventsCap {
+			s.servfailEvents = s.servfailEvents[1:]
+		}
+		s.servfailEvents = append(s.servfailEvents, ServfailEvent{
+			At:        at,
+			Domain:    name,
+			Qtype:     info.Qtype,
+			Group:     group,
+			Upstream:  info.Upstream,
+			Error:     info.Error,
+			FromCache: info.FromCache,
+		})
+	}
 	d := s.domains[name]
 	if d == nil {
 		// Лимит достигнут: новые домены не учитываем, но общие счётчики
-		// (total/hits/misses/servfail/groups) уже обновлены выше.
+		// (total/hits/misses/servfail/groups/events) уже обновлены выше.
 		if len(s.domains) >= s.maxDomains {
 			return
 		}
@@ -198,13 +254,12 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 	d.count++
 	d.total++
 	if info != nil {
-		cp := *info
-		cp.Records = append([]string(nil), info.Records...)
-		cp.Authority = append([]string(nil), info.Authority...)
-		if cp.At.IsZero() {
-			cp.At = s.now()
-		}
+		cp := cloneAnswer(info, at)
 		d.last = &cp
+		if failed {
+			d.servfail++
+			d.lastFail = &cp
+		}
 	}
 }
 
@@ -350,13 +405,92 @@ func (s *Stats) DomainInfo(name string) (DomainInfo, bool) {
 	}
 	info := DomainInfo{DomainStat: statOf(key, d, mid)}
 	if d.last != nil {
-		cp := *d.last
-		cp.Records = append([]string(nil), d.last.Records...)
-		cp.Authority = append([]string(nil), d.last.Authority...)
+		cp := cloneAnswer(d.last, d.last.At)
 		info.Last = &cp
 	}
 	s.mu.Unlock()
 	return info, true
+}
+
+// ServfailPage возвращает домены с SERVFAIL, отсортированные по убыванию
+// счётчика, и журнал последних событий (новые сверху). page нумеруется с
+// единицы; size по умолчанию DefaultPageSize и не больше MaxPageSize.
+func (s *Stats) ServfailPage(page, size int) ServfailPage {
+	if size <= 0 {
+		size = DefaultPageSize
+	}
+	if size > MaxPageSize {
+		size = MaxPageSize
+	}
+	if page < 1 {
+		page = 1
+	}
+
+	s.mu.Lock()
+	items := make([]ServfailDomain, 0, len(s.domains))
+	for name, d := range s.domains {
+		if d.servfail == 0 {
+			continue
+		}
+		sd := ServfailDomain{Domain: name, Count: d.servfail}
+		if d.lastFail != nil {
+			cp := cloneAnswer(d.lastFail, d.lastFail.At)
+			sd.Last = &cp
+		}
+		items = append(items, sd)
+	}
+	recent := make([]ServfailEvent, 0, len(s.servfailEvents))
+	for i := len(s.servfailEvents) - 1; i >= 0; i-- {
+		recent = append(recent, s.servfailEvents[i])
+	}
+	s.mu.Unlock()
+
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Count != items[j].Count {
+			return items[i].Count > items[j].Count
+		}
+		return items[i].Domain < items[j].Domain
+	})
+
+	total := len(items)
+	pages := 0
+	if total > 0 {
+		pages = (total + size - 1) / size
+		if page > pages {
+			page = pages
+		}
+	}
+	out := ServfailPage{
+		Total:        s.servfail.Load(),
+		DomainsTotal: total,
+		Page:         page,
+		Pages:        pages,
+		Size:         size,
+		Domains:      []ServfailDomain{},
+		Recent:       recent,
+	}
+	start := (page - 1) * size
+	if start >= total {
+		return out
+	}
+	end := start + size
+	if end > total {
+		end = total
+	}
+	out.Domains = items[start:end]
+	return out
+}
+
+// cloneAnswer делает глубокую копию AnswerInfo, подставляя at, если время не
+// задано.
+func cloneAnswer(info *AnswerInfo, at time.Time) AnswerInfo {
+	cp := *info
+	cp.Records = append([]string(nil), info.Records...)
+	cp.Authority = append([]string(nil), info.Authority...)
+	if cp.At.IsZero() {
+		cp.At = at
+	}
+	return cp
 }
 
 // Snapshot возвращает общие счётчики и распределение по группам.
