@@ -219,3 +219,108 @@ func TestYAMLRoundTrip(t *testing.T) {
 		t.Fatalf("round trip lost rules: %+v", back.Rules)
 	}
 }
+
+func TestECSNormalize(t *testing.T) {
+	cfg, err := Parse([]byte(`
+ecs:
+  enabled: true
+  subnet: "203.0.113.77/32"
+  ipv6_subnet: "2001:db8:1234:5678::1/64"
+  autodetect:
+    interval: 5m
+groups:
+  g1: {primary: ["1.1.1.1"]}
+default_group: g1
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	v4, v6 := cfg.ECSNets()
+	if v4 == nil || v4.String() != "203.0.113.0/24" {
+		t.Fatalf("v4 subnet = %v, want 203.0.113.0/24", v4)
+	}
+	if v6 == nil || v6.String() != "2001:db8:1234:5600::/56" {
+		t.Fatalf("v6 subnet = %v, want 2001:db8:1234:5600::/56", v6)
+	}
+	if got := cfg.ECS.AutodetectInterval().String(); got != "5m0s" {
+		t.Fatalf("interval = %s, want 5m0s", got)
+	}
+}
+
+func TestECSValidationErrors(t *testing.T) {
+	cases := map[string]string{
+		"enabled without subnet": `
+ecs: {enabled: true}
+groups:
+  g1: {primary: ["1.1.1.1"]}
+default_group: g1
+`,
+		"bad v4 subnet": `
+ecs: {enabled: true, subnet: "203.0.113.0"}
+groups:
+  g1: {primary: ["1.1.1.1"]}
+default_group: g1
+`,
+		"v6 in v4 field": `
+ecs: {enabled: true, subnet: "2001:db8::/56"}
+groups:
+  g1: {primary: ["1.1.1.1"]}
+default_group: g1
+`,
+		"v4 in v6 field": `
+ecs: {enabled: true, ipv6_subnet: "203.0.113.0/24"}
+groups:
+  g1: {primary: ["1.1.1.1"]}
+default_group: g1
+`,
+		"bad autodetect url": `
+ecs: {enabled: true, autodetect: {url: "ipify.org"}}
+groups:
+  g1: {primary: ["1.1.1.1"]}
+default_group: g1
+`,
+		"too short interval": `
+ecs: {enabled: true, autodetect: {url: "https://api.ipify.org", interval: 5s}}
+groups:
+  g1: {primary: ["1.1.1.1"]}
+default_group: g1
+`,
+	}
+	for name, yaml := range cases {
+		if _, err := Parse([]byte(yaml)); err == nil {
+			t.Errorf("%s: expected error, got nil", name)
+		}
+	}
+}
+
+func TestECSGroupOverride(t *testing.T) {
+	cfg, err := Parse([]byte(`
+ecs:
+  enabled: true
+  subnet: "203.0.113.0/24"
+groups:
+  local: {primary: ["1.1.1.1"]}
+  vpn:   {primary: ["2.2.2.2"], ecs: false}
+default_group: local
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.Groups["vpn"].ECS == nil || *cfg.Groups["vpn"].ECS {
+		t.Fatalf("vpn group ecs = %v, want false", cfg.Groups["vpn"].ECS)
+	}
+	if cfg.Groups["local"].ECS != nil {
+		t.Fatalf("local group ecs = %v, want nil (inherit global)", cfg.Groups["local"].ECS)
+	}
+	// Round trip не должен добавлять ecs: null в группы без override.
+	back, err := Parse([]byte(cfg.YAML()))
+	if err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	if back.Groups["vpn"].ECS == nil || *back.Groups["vpn"].ECS {
+		t.Fatalf("round trip lost ecs override: %v", back.Groups["vpn"].ECS)
+	}
+	if back.Groups["local"].ECS != nil {
+		t.Fatalf("round trip added ecs override to local: %v", back.Groups["local"].ECS)
+	}
+}

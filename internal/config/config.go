@@ -19,6 +19,7 @@ type Config struct {
 	Cache        Cache            `yaml:"cache"`
 	Stats        Stats            `yaml:"stats"`
 	Upstream     Upstream         `yaml:"upstream"`
+	ECS          ECS              `yaml:"ecs,omitempty"`
 	Groups       map[string]Group `yaml:"groups"`
 	DefaultGroup string           `yaml:"default_group"`
 	Rules        []Rule           `yaml:"rules"`
@@ -59,6 +60,92 @@ type Upstream struct {
 	Timeout string `yaml:"timeout"` // duration, по умолчанию 3s
 }
 
+// ECS — параметры EDNS Client Subnet (RFC 7871): в запрос к вышестоящему
+// серверу добавляется наша публичная подсеть, чтобы гео-зависимые CDN
+// возвращали адреса, близкие к нам, а не к локации апстрима.
+type ECS struct {
+	Enabled bool `yaml:"enabled"`
+	// Subnet — публичный IPv4-префикс, например "203.0.113.0/24". Более
+	// длинный префикс нормализуется до /24: передача точного адреса избыточна
+	// для геолокации и снижает приватность.
+	Subnet string `yaml:"subnet,omitempty"`
+	// IPv6Subnet — публичный IPv6-префикс; нормализуется до /56.
+	IPv6Subnet string `yaml:"ipv6_subnet,omitempty"`
+	// Autodetect — периодическое определение публичного адреса по HTTP.
+	// Успешный результат приоритетнее статических subnet/ipv6_subnet.
+	Autodetect ECSAutodetect `yaml:"autodetect,omitempty"`
+}
+
+// ECSAutodetect — источники публичного адреса для ECS.
+type ECSAutodetect struct {
+	// URL — сервис, возвращающий публичный IPv4 в виде текста
+	// (например, https://api.ipify.org).
+	URL string `yaml:"url,omitempty"`
+	// URL6 — сервис, возвращающий публичный IPv6 (например, https://api6.ipify.org).
+	URL6 string `yaml:"url6,omitempty"`
+	// Interval — период обновления (duration); по умолчанию 10m, минимум 1m.
+	Interval string `yaml:"interval,omitempty"`
+}
+
+// AutodetectInterval возвращает период автоопределения публичного адреса.
+func (e ECS) AutodetectInterval() time.Duration {
+	if e.Autodetect.Interval == "" {
+		return 10 * time.Minute
+	}
+	d, err := time.ParseDuration(e.Autodetect.Interval)
+	if err != nil || d < time.Minute {
+		return 10 * time.Minute
+	}
+	return d
+}
+
+// ParseECSNet разбирает CIDR-подсеть и обрезает префикс до рекомендуемого
+// максимума (family=4 → /24, family=6 → /56), возвращая нормализованную сеть.
+func ParseECSNet(s string, family int) (*net.IPNet, error) {
+	ip, n, err := net.ParseCIDR(strings.TrimSpace(s))
+	if err != nil {
+		return nil, err
+	}
+	ones, bits := n.Mask.Size()
+	var maxBits int
+	switch family {
+	case 4:
+		maxBits = 24
+		if bits != 32 || ip.To4() == nil {
+			return nil, fmt.Errorf("not an IPv4 subnet: %q", s)
+		}
+		ip = ip.To4()
+	case 6:
+		maxBits = 56
+		if bits != 128 || ip.To4() != nil {
+			return nil, fmt.Errorf("not an IPv6 subnet: %q", s)
+		}
+	default:
+		return nil, fmt.Errorf("unknown IP family %d", family)
+	}
+	if ones > maxBits {
+		ones = maxBits
+	}
+	mask := net.CIDRMask(ones, bits)
+	return &net.IPNet{IP: ip.Mask(mask), Mask: mask}, nil
+}
+
+// ECSNets возвращает нормализованные статические подсети для ECS (nil, если
+// соответствующая подсеть не задана). Конфигурация предполагается валидной.
+func (c *Config) ECSNets() (v4, v6 *net.IPNet) {
+	if s := strings.TrimSpace(c.ECS.Subnet); s != "" {
+		if n, err := ParseECSNet(s, 4); err == nil {
+			v4 = n
+		}
+	}
+	if s := strings.TrimSpace(c.ECS.IPv6Subnet); s != "" {
+		if n, err := ParseECSNet(s, 6); err == nil {
+			v6 = n
+		}
+	}
+	return v4, v6
+}
+
 // Group — группа апстримов с единым протоколом и набором primary/fallback.
 type Group struct {
 	Protocol  string   `yaml:"protocol"`  // udp | dot | doh
@@ -69,6 +156,10 @@ type Group struct {
 	// резолв хостнейма апстрима недоступен (bootstrap-UDP закрыт). Хостнейм в
 	// URL сохраняется для TLS-SNI/проверки сертификата, а соединение идёт на IP.
 	Hosts map[string]string `yaml:"hosts"`
+	// ECS перекрывает глобальную настройку ECS для группы: false отключает
+	// передачу клиентской подсети (нужно для зон, которые специально должны
+	// резолвиться с локацией удалённого апстрима, например для VPN).
+	ECS *bool `yaml:"ecs,omitempty"`
 }
 
 // Rule — правило маршрутизации зоны на группу апстримов.
@@ -178,6 +269,11 @@ func (c *Config) normalize() {
 	if c.Web.Listen == "" {
 		c.Web.Listen = ":8080"
 	}
+	c.ECS.Subnet = strings.TrimSpace(c.ECS.Subnet)
+	c.ECS.IPv6Subnet = strings.TrimSpace(c.ECS.IPv6Subnet)
+	c.ECS.Autodetect.URL = strings.TrimSpace(c.ECS.Autodetect.URL)
+	c.ECS.Autodetect.URL6 = strings.TrimSpace(c.ECS.Autodetect.URL6)
+	c.ECS.Autodetect.Interval = strings.TrimSpace(c.ECS.Autodetect.Interval)
 	if c.Cache.MaxEntries <= 0 {
 		c.Cache.MaxEntries = 10000
 	}
@@ -245,8 +341,50 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("rule %d (zone %q): group %q not found", i, r.Zone, r.Group)
 		}
 	}
+	if err := c.validateECS(); err != nil {
+		return err
+	}
 	if c.Cache.Enabled && c.Cache.MaxTTL > 0 && c.Cache.MinTTL > c.Cache.MaxTTL {
 		return fmt.Errorf("cache: min_ttl (%d) > max_ttl (%d)", c.Cache.MinTTL, c.Cache.MaxTTL)
+	}
+	return nil
+}
+
+// validateECS проверяет настройки EDNS Client Subnet.
+func (c *Config) validateECS() error {
+	if c.ECS.Subnet != "" {
+		if _, err := ParseECSNet(c.ECS.Subnet, 4); err != nil {
+			return fmt.Errorf("ecs.subnet: %w", err)
+		}
+	}
+	if c.ECS.IPv6Subnet != "" {
+		if _, err := ParseECSNet(c.ECS.IPv6Subnet, 6); err != nil {
+			return fmt.Errorf("ecs.ipv6_subnet: %w", err)
+		}
+	}
+	for name, u := range map[string]string{
+		"ecs.autodetect.url":  c.ECS.Autodetect.URL,
+		"ecs.autodetect.url6": c.ECS.Autodetect.URL6,
+	} {
+		if u == "" {
+			continue
+		}
+		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+			return fmt.Errorf("%s: must be an http(s) URL: %q", name, u)
+		}
+	}
+	if !c.ECS.Enabled {
+		return nil
+	}
+	if c.ECS.Subnet == "" && c.ECS.IPv6Subnet == "" &&
+		c.ECS.Autodetect.URL == "" && c.ECS.Autodetect.URL6 == "" {
+		return fmt.Errorf("ecs: enabled but neither subnet nor autodetect.url is set")
+	}
+	if c.ECS.Autodetect.Interval != "" {
+		d, err := time.ParseDuration(c.ECS.Autodetect.Interval)
+		if err != nil || d < time.Minute {
+			return fmt.Errorf("ecs.autodetect.interval: want duration >= 1m, got %q", c.ECS.Autodetect.Interval)
+		}
 	}
 	return nil
 }

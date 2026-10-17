@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -40,6 +41,8 @@ type state struct {
 	cacheEnabled bool
 	minTTL       uint32
 	maxTTL       uint32
+	ecs          config.ECS      // настройки EDNS Client Subnet
+	ecsOff       map[string]bool // группы с ECS, отключённым через override
 }
 
 // Server обслуживает DNS-запросы.
@@ -51,6 +54,14 @@ type Server struct {
 	// sf дедуплицирует одинаковые одновременные запросы: пока первый запрос
 	// ждёт апстрим, остальные ждут его результат вместо повторного обращения.
 	sf singleflight.Group
+
+	// ECS: текущие подсети (статические или определённые автоматически),
+	// статический фолбэк и управление фоновым автоопределением.
+	ecsMu     sync.RWMutex
+	ecsNets   ecsNets
+	ecsStatic ecsNets
+	ecsGen    atomic.Uint64 // защита от записи результата устаревшего детектора
+	ecsCancel context.CancelFunc
 }
 
 // New собирает сервер по конфигурации.
@@ -67,6 +78,7 @@ func New(cfg *config.Config, c *cache.Cache, st *stats.Stats, log *slog.Logger) 
 		return nil, err
 	}
 	s.st.Store(nst)
+	s.applyECSConfig(cfg)
 	return s, nil
 }
 
@@ -77,10 +89,31 @@ func (s *Server) Reload(cfg *config.Config) error {
 		return err
 	}
 	old := s.st.Swap(nst)
+	s.applyECSConfig(cfg)
 	if old != nil {
 		closeState(old)
+		// Ответы, полученные с прежней ECS-подсетью, для новой уже неверны.
+		if s.cache != nil && !sameECSConfig(old, nst) {
+			s.cache.Flush()
+		}
 	}
 	return nil
+}
+
+// sameECSConfig сообщает, одинаковы ли настройки ECS у двух снимков.
+func sameECSConfig(a, b *state) bool {
+	if a.ecs != b.ecs {
+		return false
+	}
+	if len(a.ecsOff) != len(b.ecsOff) {
+		return false
+	}
+	for name, off := range a.ecsOff {
+		if b.ecsOff[name] != off {
+			return false
+		}
+	}
+	return true
 }
 
 func buildState(cfg *config.Config, timeout time.Duration, cacheEnabled bool) (*state, error) {
@@ -101,6 +134,12 @@ func buildState(cfg *config.Config, timeout time.Duration, cacheEnabled bool) (*
 			maxAttempts = n
 		}
 	}
+	ecsOff := make(map[string]bool)
+	for name, g := range cfg.Groups {
+		if g.ECS != nil && !*g.ECS {
+			ecsOff[name] = true
+		}
+	}
 	return &state{
 		matcher:      rules.New(cfg.Rules),
 		groups:       groups,
@@ -110,6 +149,8 @@ func buildState(cfg *config.Config, timeout time.Duration, cacheEnabled bool) (*
 		cacheEnabled: cacheEnabled,
 		minTTL:       cfg.Cache.MinTTL,
 		maxTTL:       cfg.Cache.MaxTTL,
+		ecs:          cfg.ECS,
+		ecsOff:       ecsOff,
 	}, nil
 }
 
@@ -139,6 +180,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		if msg, origin, ok := c.Get(q, do); ok {
 			msg.Id = r.Id
 			msg.Question = r.Question
+			fitEDNS(msg, r)
 			s.record(q.Name, groupName, true, answerInfo(msg, q.Qtype, origin, true, 0, nil))
 			writeReply(w, r, msg)
 			return
@@ -164,6 +206,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	out := res.resp.Copy()
 	out.Id = r.Id
 	out.Question = r.Question
+	fitEDNS(out, r)
 	s.record(q.Name, groupName, false, answerInfo(out, q.Qtype, res.origin, false, res.elapsed, res.attempts))
 	writeReply(w, r, out)
 }
@@ -188,6 +231,12 @@ func (s *Server) exchange(st *state, q dns.Question, do bool, r *dns.Msg, group 
 	up.RecursionDesired = true
 	// Свой Id для запроса к апстриму — гигиена против коллизий с Id клиента.
 	up.Id = uint16(rand.Uint32())
+	// EDNS Client Subnet: сообщаем апстриму нашу публичную подсеть, чтобы
+	// гео-зависимые CDN вернули адреса, близкие к нам. Для групп с явным
+	// override ecs: false подсеть не передаётся.
+	if st.ecs.Enabled && !st.ecsOff[groupName] {
+		s.applyECS(up, q.Qtype)
+	}
 
 	start := time.Now()
 	resp, origin, attempts, err := group.Exchange(ctx, up)
