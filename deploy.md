@@ -26,8 +26,35 @@ MIKROTIK_USER_NAME=admin
 MIKROTIK_USER_PASSWORD=...
 ```
 
-Примеры ниже используют `$MIKROTIK_HOST` / `$MIKROTIK_USER_NAME`. Пароль
-вводится интерактивно, либо через `sshpass`/`expect`, если он есть локально.
+Примеры ниже используют `$MIKROTIK_HOST` / `$MIKROTIK_USER_NAME`.
+
+### Подключение через `ros.sh`
+
+Для выполнения команд на роутере используйте `ros.sh` из корня проекта —
+это expect-обёртка над `ssh`. Скрипт читает `MIKROTIK_*` из окружения и сам
+подставляет пароль, поэтому `sshpass` не нужен и вводить пароль вручную не
+приходится.
+
+```sh
+chmod +x ros.sh
+set -a; . ./.env; set +a
+
+./ros.sh '/container/print where name=dns-guard'
+```
+
+`ros.sh` принимает **одну** команду RouterOS как единственный аргумент и
+передаёт её в `ssh`. Команды с пробелами и `[find ...]` обязательно
+заключайте в кавычки, чтобы их не разобрала локальная оболочка:
+
+```sh
+./ros.sh '/container/print detail where name=dns-guard'
+./ros.sh '/container/stop [find where name="dns-guard"]'
+./ros.sh '/container/start [find where name="dns-guard"]'
+```
+
+Таймаут выполнения — 5 минут. Для нескольких команд вызывайте скрипт
+несколько раз. Если `.env` не загружен, реквизиты будут пустыми и подключение
+не пройдёт — выполните `set -a; . ./.env; set +a` в текущей сессии.
 
 ## Параметры текущего контейнера
 
@@ -92,8 +119,7 @@ curl -s "https://hub.docker.com/v2/repositories/nskforward/dns-guard/tags?page_s
 ### 1. Зафиксировать текущее состояние
 
 ```sh
-ssh "$MIKROTIK_USER_NAME@$MIKROTIK_HOST" \
-  "/container/print detail where name=dns-guard"
+./ros.sh '/container/print detail where name=dns-guard'
 ```
 
 Запомните `image-id` — по нему потом проверите, что образ реально сменился.
@@ -183,8 +209,7 @@ dig @192.168.88.1 ya.ru A +tcp +short
 ### 8. Убедиться, что образ обновился
 
 ```sh
-ssh "$MIKROTIK_USER_NAME@$MIKROTIK_HOST" \
-  "/container/print detail where name=dns-guard" | grep -A1 image-id
+./ros.sh '/container/print detail where name=dns-guard' | grep -A1 image-id
 ```
 
 `image-id` должен отличаться от зафиксированного на шаге 1.
@@ -246,6 +271,13 @@ ssh "$MIKROTIK_USER_NAME@$MIKROTIK_HOST" \
 /container/stop   [find where name="dns-guard"]
 /container/update [find where name="dns-guard"]
 /container/start  [find where name="dns-guard"]
+```
+
+Любую из команд можно выполнить через `ros.sh`, передав её одной строкой:
+
+```sh
+./ros.sh '/container/print where name=dns-guard'
+./ros.sh '/log/print where topics~"container"'
 ```
 
 Проверка API: `/api/health`, `/api/stats`, `/api/upstreams`, `/api/domains`,
