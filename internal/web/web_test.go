@@ -10,6 +10,32 @@ import (
 	"github.com/nskforward/dns-guard/internal/stats"
 )
 
+func TestVersionAPI(t *testing.T) {
+	h := New(Deps{Version: "1.2.3"}).Handler()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/version", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["version"] != "1.2.3" {
+		t.Fatalf("version = %q, want 1.2.3", body["version"])
+	}
+
+	// Пустая версия означает локальную сборку.
+	rec = httptest.NewRecorder()
+	New(Deps{}).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/version", nil))
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode default: %v", err)
+	}
+	if body["version"] != "dev" {
+		t.Fatalf("default version = %q, want dev", body["version"])
+	}
+}
+
 func TestDomainsAPI(t *testing.T) {
 	st := stats.New(0)
 	st.Record("a.example.com.", "g", false, &stats.AnswerInfo{

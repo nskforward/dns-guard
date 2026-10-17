@@ -190,6 +190,7 @@ curl -s "https://hub.docker.com/v2/repositories/nskforward/dns-guard/tags?page_s
 ```sh
 # веб-UI и API контейнера
 curl -s http://192.168.89.3:8080/api/health        # {"status":"ok"}
+curl -s http://192.168.89.3:8080/api/version       # {"version":"1.0.4"}
 curl -s http://192.168.89.3:8080/api/upstreams     # статистика по группам
 
 # DNS через роутер (UDP и TCP)
@@ -280,8 +281,9 @@ dig @192.168.88.1 ya.ru A +tcp +short
 ./ros.sh '/log/print where topics~"container"'
 ```
 
-Проверка API: `/api/health`, `/api/stats`, `/api/upstreams`, `/api/domains`,
-`/api/domain?name=...`, `/api/config`.
+Проверка API: `/api/health`, `/api/version`, `/api/stats`, `/api/upstreams`,
+`/api/domains`, `/api/domain?name=...`, `/api/config`. Текущая версия также
+показана в шапке веб-UI рядом с названием.
 
 ## Что важно помнить
 

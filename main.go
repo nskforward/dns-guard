@@ -22,6 +22,9 @@ import (
 	"github.com/nskforward/dns-guard/internal/web"
 )
 
+// version подставляется при сборке через -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	cfgPath := flag.String("config", "config.yaml", "путь к файлу конфигурации")
 	logLevel := flag.String("log-level", "info", "уровень логирования: debug|info|warn|error")
@@ -70,12 +73,13 @@ func main() {
 	var httpSrv *http.Server
 	if cfg.Web.Enabled {
 		wsrv := web.New(web.Deps{
-			Path:   *cfgPath,
-			Stats:  st,
-			Cache:  c,
-			Config: app.getConfig,
-			Reload: app.reload,
-			Log:    log,
+			Path:    *cfgPath,
+			Version: version,
+			Stats:   st,
+			Cache:   c,
+			Config:  app.getConfig,
+			Reload:  app.reload,
+			Log:     log,
 		})
 		httpSrv = &http.Server{
 			Addr:              cfg.Web.Listen,
@@ -91,6 +95,7 @@ func main() {
 	}
 
 	log.Info("dns-guard started",
+		"version", version,
 		"groups", len(cfg.Groups),
 		"rules", len(cfg.Rules),
 		"cache", cfg.Cache.Enabled,

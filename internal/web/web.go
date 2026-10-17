@@ -21,12 +21,13 @@ var assets embed.FS
 
 // Deps — зависимости веб-сервера.
 type Deps struct {
-	Path   string                         // путь к файлу конфигурации
-	Stats  *stats.Stats                   // сборщик статистики
-	Cache  *cache.Cache                   // кэш (может быть nil)
-	Config func() *config.Config          // текущая конфигурация
-	Reload func(cfg *config.Config) error // применение конфигурации на лету
-	Log    *slog.Logger
+	Path    string                         // путь к файлу конфигурации
+	Version string                         // версия приложения для UI и API
+	Stats   *stats.Stats                   // сборщик статистики
+	Cache   *cache.Cache                   // кэш (может быть nil)
+	Config  func() *config.Config          // текущая конфигурация
+	Reload  func(cfg *config.Config) error // применение конфигурации на лету
+	Log     *slog.Logger
 }
 
 // Server — HTTP-сервер веб-интерфейса.
@@ -43,6 +44,7 @@ func New(d Deps) *Server {
 	s := &Server{deps: d, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/", s.handleIndex)
 	s.mux.HandleFunc("/api/health", s.handleHealth)
+	s.mux.HandleFunc("/api/version", s.handleVersion)
 	s.mux.HandleFunc("/api/stats", s.handleStats)
 	s.mux.HandleFunc("/api/domains", s.handleDomains)
 	s.mux.HandleFunc("/api/domain", s.handleDomain)
@@ -77,6 +79,14 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	v := s.deps.Version
+	if v == "" {
+		v = "dev"
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"version": v})
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {

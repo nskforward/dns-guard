@@ -14,8 +14,9 @@ COPY . .
 # Кросс-компиляция статического бинаря. По умолчанию — linux/arm64 (hAP ax³).
 ARG TARGETOS=linux
 ARG TARGETARCH=arm64
+ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /out/dns-guard .
+    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/dns-guard .
 
 # --- Рантайм ---
 # NOTE: слушаем привилегированный порт 53, поэтому образ работает от root.
