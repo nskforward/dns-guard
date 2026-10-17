@@ -38,21 +38,36 @@ MIN/MAX-TTL, кэширует ответы в памяти и показывае
   неудачные попытки), правка конфига.
 - Один статический бинарь, без CGO, работает в distroless.
 
-## Сборка и запуск (локально)
+## Запуск готового образа
+
+Готовый образ публикуется в Docker Hub:
+[`nskforward/dns-guard`](https://hub.docker.com/r/nskforward/dns-guard).
+Тег `latest` — последняя версия; для воспроизводимого деплоя используйте
+конкретный тег (`nskforward/dns-guard:1.0.7`).
 
 ```sh
-go build ./...
-go test ./...
-
 cp config.example.yaml config.yaml
-./dns-guard -config config.yaml
+
+docker pull nskforward/dns-guard:latest
+
+docker run -d --name dns-guard \
+  --restart unless-stopped \
+  -p 53:53/udp -p 53:53/tcp \
+  -p 8080:8080 \
+  -v "$PWD/config.yaml:/etc/dns-guard/config.yaml:ro" \
+  nskforward/dns-guard:latest
 ```
 
-Флаги:
+Конфиг монтируется в `/etc/dns-guard/config.yaml` — этот путь контейнер
+использует по умолчанию. Дополнительные флаги передаются после имени образа:
+
+```sh
+docker run ... nskforward/dns-guard:latest -log-level debug
+```
 
 | Флаг | По умолчанию | Описание |
 |---|---|---|
-| `-config` | `config.yaml` | путь к файлу конфигурации |
+| `-config` | `/etc/dns-guard/config.yaml` (в контейнере) | путь к файлу конфигурации |
 | `-log-level` | `info` | `debug` / `info` / `warn` / `error` |
 
 Проверка:
@@ -489,11 +504,11 @@ curl -s -X PUT localhost:8080/api/config \
 а его upstream-сервером становится dns-guard. Это критично, если DNS управляет
 VPN-маршрутизацией через `address-list` (см. предупреждение ниже).
 
-### 1. Подготовка образа
+### 1. Образ
 
-```sh
-docker buildx build --platform linux/arm64 -t <user>/dns-guard:latest --push .
-```
+Образ берётся из Docker Hub — собирать ничего не нужно. Для hAP ax³
+используется тег `nskforward/dns-guard:latest` (linux/arm64); RouterOS
+подтянет нужную архитектуру автоматически.
 
 ### 2. Сеть контейнера
 
@@ -520,7 +535,7 @@ docker buildx build --platform linux/arm64 -t <user>/dns-guard:latest --push .
 
 ```rsc
 /container/add \
-  remote-image=user/dns-guard:latest \
+  remote-image=nskforward/dns-guard:latest \
   interface=veth-dnsguard \
   root-dir=usb1/volumes/usb1-something/dns-guard-root \
   mounts=dnsguard-conf \
@@ -529,8 +544,9 @@ docker buildx build --platform linux/arm64 -t <user>/dns-guard:latest --push .
   comment="dns-guard"
 ```
 
-> `usb1/volumes/...` и `remote-image` замените на свои значения. Если образ
-> требует указания архитектуры — RouterOS подтянет arm64 автоматически.
+> `usb1/volumes/...` замените на свои значения. Образ
+> `nskforward/dns-guard:latest` уже собран под arm64 — RouterOS подтянет его
+> автоматически.
 
 Проверьте, что сервис поднялся:
 
