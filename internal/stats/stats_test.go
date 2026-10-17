@@ -135,33 +135,58 @@ func TestPeakRPMRollover(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		s.Record("a.example.com.", "g", false, nil)
 	}
-	if got := top(); got.Current != 3 || got.PeakRPM != 0 {
+	if got := top(); got.PeakRPM != 0 {
 		t.Fatalf("minute 0: %+v", got)
 	}
 
 	// Минута 1: 1 запрос -> rollover, peak = 3.
 	now = time.Unix(60, 0)
 	s.Record("a.example.com.", "g", false, nil)
-	if got := top(); got.Current != 1 || got.PeakRPM != 3 {
+	if got := top(); got.PeakRPM != 3 {
 		t.Fatalf("minute 1: %+v", got)
 	}
 
-	// Минута 2: 5 запросов -> peak остаётся 3, current 5.
+	// Минута 2: 5 запросов -> peak остаётся 3.
 	now = time.Unix(120, 0)
 	for i := 0; i < 5; i++ {
 		s.Record("a.example.com.", "g", false, nil)
 	}
-	if got := top(); got.Current != 5 || got.PeakRPM != 3 {
+	if got := top(); got.PeakRPM != 3 {
 		t.Fatalf("minute 2: %+v", got)
 	}
 
 	// Минута 3: без запросов -> финализация минуты 2, peak = 5.
 	now = time.Unix(180, 0)
-	if got := top(); got.Current != 0 || got.PeakRPM != 5 {
+	if got := top(); got.PeakRPM != 5 {
 		t.Fatalf("minute 3: %+v", got)
 	}
 	if got := top(); got.PeakRPM != 5 {
 		t.Fatalf("minute 3 repeat: %+v", got)
+	}
+}
+
+func TestDomainCacheHits(t *testing.T) {
+	now := time.Unix(0, 0)
+	s := newWithClock(0, func() time.Time { return now })
+	top := func() DomainStat { return s.DomainsPage(1, 0, "").Items[0] }
+
+	s.Record("a.example.com.", "g", true, nil)
+	s.Record("a.example.com.", "g", false, nil)
+	s.Record("a.example.com.", "g", true, nil)
+
+	got := top()
+	if got.CacheHits != 2 {
+		t.Fatalf("cache hits = %d, want 2 (%+v)", got.CacheHits, got)
+	}
+	if got.Total != 3 {
+		t.Fatalf("total = %d, want 3 (%+v)", got.Total, got)
+	}
+
+	// Хиты накапливаются между минутами и не сбрасываются при rollover.
+	now = time.Unix(60, 0)
+	s.Record("a.example.com.", "g", true, nil)
+	if got := top(); got.CacheHits != 3 {
+		t.Fatalf("cache hits after rollover = %d, want 3 (%+v)", got.CacheHits, got)
 	}
 }
 

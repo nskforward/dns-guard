@@ -34,10 +34,10 @@ const (
 
 // DomainStat — статистика по полному доменному имени.
 type DomainStat struct {
-	Domain  string `json:"domain"`
-	Total   uint64 `json:"total"`
-	Current uint64 `json:"current_minute"`
-	PeakRPM uint64 `json:"peak_rpm"`
+	Domain    string `json:"domain"`
+	Total     uint64 `json:"total"`
+	CacheHits uint64 `json:"cache_hits"`
+	PeakRPM   uint64 `json:"peak_rpm"`
 }
 
 // AnswerInfo — сведения о последнем ответе, выданном по домену.
@@ -146,6 +146,7 @@ type domain struct {
 	count    uint64                 // запросов в текущей минуте
 	peak     uint64                 // максимум count за завершённые минуты
 	total    uint64                 // всего запросов
+	hits     uint64                 // ответов из кэша
 	servfail uint64                 // SERVFAIL-ответов
 	answers  map[string]*AnswerInfo // последний ответ по каждому qtype
 	lastFail *AnswerInfo            // последний SERVFAIL-ответ
@@ -301,6 +302,9 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 	}
 	d.count++
 	d.total++
+	if hit {
+		d.hits++
+	}
 	if info != nil {
 		cp := cloneAnswer(info, at)
 		if cp.successful() {
@@ -633,18 +637,14 @@ func (s *Stats) Snapshot() Snapshot {
 // statOf собирает DomainStat, финализируя текущую минуту на момент mid.
 func statOf(name string, d *domain, mid int64) DomainStat {
 	peak := d.peak
-	current := d.count
-	if d.minute != mid {
-		if current > peak {
-			peak = current
-		}
-		current = 0
+	if d.minute != mid && d.count > peak {
+		peak = d.count
 	}
 	return DomainStat{
-		Domain:  name,
-		Total:   d.total,
-		Current: current,
-		PeakRPM: peak,
+		Domain:    name,
+		Total:     d.total,
+		CacheHits: d.hits,
+		PeakRPM:   peak,
 	}
 }
 

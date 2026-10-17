@@ -35,7 +35,7 @@
   .muted { color:var(--muted); }
   button.act { background:var(--accent); color:#fff; border:none; padding:8px 16px; border-radius:8px; cursor:pointer; font-size:14px; }
   button.act.secondary { background:var(--panel); border:1px solid var(--line); color:var(--fg); }
-  input[type=search] { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px 12px; font-size:14px; min-width:280px; }
+  input[type=search] { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px 12px; font-size:14px; min-width:400px; }
   input[type=search]:focus { outline:none; border-color:var(--accent); }
   .pager { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:12px; }
   .pager button { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:6px 10px; cursor:pointer; font-size:13px; min-width:34px; }
@@ -99,14 +99,12 @@
     </div>
     <div class="row" style="margin-top:12px">
       <span>
-        <input type="search" id="search" placeholder="Search by domain (substring)" onkeydown="if (event.key === 'Enter') applySearch()">
-        <button class="act" onclick="applySearch()">Find</button>
-        <button class="act secondary" onclick="resetSearch()">Reset</button>
+        <input type="search" id="search" placeholder="Search by domain (substring)" onkeydown="if (event.key === 'Enter') applySearch()" oninput="if (!this.value.trim() && search !== '') applySearch()">
       </span>
       <span id="domains-total" class="muted"></span>
     </div>
     <table>
-      <thead><tr><th>#</th><th>Domain</th><th class="num">Requests</th><th class="num">Current RPM</th><th class="num">Peak RPM</th></tr></thead>
+      <thead><tr><th>#</th><th>Domain</th><th class="num">Requests</th><th class="num">Cache Hits</th><th class="num">Peak RPM</th></tr></thead>
       <tbody id="top"></tbody>
     </table>
     <div id="pager" class="pager"></div>
@@ -290,7 +288,7 @@ function renderRows(items) {
     tr.innerHTML = '<td class="muted">' + ((page - 1) * PAGE_SIZE + i + 1) + '</td>' +
       '<td class="domain"></td>' +
       '<td class="num">' + fmt(x.total) + '</td>' +
-      '<td class="num">' + fmt(x.current_minute) + '</td>' +
+      '<td class="num">' + fmt(x.cache_hits) + '</td>' +
       '<td class="num">' + fmt(x.peak_rpm) + '</td>';
     tr.children[1].textContent = x.domain;
     tr.addEventListener('click', () => showDomain(x.domain));
@@ -356,13 +354,6 @@ function goPage(p) {
 
 function applySearch() {
   search = document.getElementById('search').value.trim();
-  page = 1;
-  loadDomains();
-}
-
-function resetSearch() {
-  document.getElementById('search').value = '';
-  search = '';
   page = 1;
   loadDomains();
 }
@@ -573,7 +564,7 @@ async function showDomain(name) {
 function renderDomain(d) {
   document.getElementById('m-title').textContent = d.domain;
   document.getElementById('m-meta').textContent =
-    'Requests: ' + fmt(d.total) + ' · Current RPM: ' + fmt(d.current_minute) + ' · Peak RPM: ' + fmt(d.peak_rpm);
+    'Requests: ' + fmt(d.total) + ' · Cache hits: ' + fmt(d.cache_hits) + ' · Peak RPM: ' + fmt(d.peak_rpm);
 
   const box = document.getElementById('m-last');
   box.innerHTML = '';
