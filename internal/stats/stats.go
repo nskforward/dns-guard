@@ -49,6 +49,24 @@ type DomainInfo struct {
 	Last *AnswerInfo `json:"last,omitempty"`
 }
 
+// UpstreamStat — счётчики попыток одного апстрима в группе.
+type UpstreamStat struct {
+	Upstream string `json:"upstream"`
+	Ok       uint64 `json:"ok"`
+	Failed   uint64 `json:"failed"`
+}
+
+// GroupStat — статистика по группе апстримов: запросы, кэш-хиты и разбивка
+// по серверам группы. Total учитывает все запросы, обслуженные группой;
+// Upstreams — только реальные обращения к серверам (промахи кэша).
+type GroupStat struct {
+	Name      string         `json:"name"`
+	Total     uint64         `json:"total"`
+	CacheHits uint64         `json:"cache_hits"`
+	Failed    uint64         `json:"failed"`
+	Upstreams []UpstreamStat `json:"upstreams"`
+}
+
 // Snapshot — снимок общих счётчиков на момент вызова.
 type Snapshot struct {
 	Uptime      int64             `json:"uptime_seconds"`
@@ -78,6 +96,12 @@ type domain struct {
 	last   *AnswerInfo // последний выданный ответ
 }
 
+// upstreamCounters — счётчики попыток одного апстрима.
+type upstreamCounters struct {
+	ok     uint64
+	failed uint64
+}
+
 // Stats — потокобезопасный сборщик статистики.
 type Stats struct {
 	start time.Time
@@ -90,9 +114,11 @@ type Stats struct {
 	cacheMisses atomic.Uint64
 	servfail    atomic.Uint64
 
-	mu      sync.Mutex
-	domains map[string]*domain
-	groups  map[string]uint64
+	mu        sync.Mutex
+	domains   map[string]*domain
+	groups    map[string]uint64
+	groupHits map[string]uint64
+	ups       map[string]map[string]*upstreamCounters
 }
 
 // New создаёт сборщик статистики. maxDomains <= 0 означает DefaultMaxDomains.
@@ -108,6 +134,8 @@ func newWithClock(maxDomains int, now func() time.Time) *Stats {
 		maxDomains: maxDomains,
 		domains:    make(map[string]*domain),
 		groups:     make(map[string]uint64),
+		groupHits:  make(map[string]uint64),
+		ups:        make(map[string]map[string]*upstreamCounters),
 	}
 }
 
@@ -143,6 +171,9 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 	defer s.mu.Unlock()
 	if group != "" {
 		s.groups[group]++
+		if hit {
+			s.groupHits[group]++
+		}
 	}
 	if name == "" {
 		return
@@ -175,6 +206,79 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 		}
 		d.last = &cp
 	}
+}
+
+// RecordUpstream учитывает одну попытку обращения к апстриму группы.
+// failed — сервер не дал ответа (таймаут, сетевая ошибка и т.п.).
+func (s *Stats) RecordUpstream(group, upstream string, failed bool) {
+	if group == "" || upstream == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.ups[group]
+	if m == nil {
+		m = make(map[string]*upstreamCounters)
+		s.ups[group] = m
+	}
+	c := m[upstream]
+	if c == nil {
+		c = &upstreamCounters{}
+		m[upstream] = c
+	}
+	if failed {
+		c.failed++
+	} else {
+		c.ok++
+	}
+}
+
+// UpstreamsPage возвращает статистику по группам апстримов: группы по убыванию
+// общего числа запросов, внутри группы — серверы по убыванию числа попыток.
+func (s *Stats) UpstreamsPage() []GroupStat {
+	s.mu.Lock()
+	out := make([]GroupStat, 0, len(s.groups)+len(s.ups))
+	seen := make(map[string]struct{}, len(s.groups)+len(s.ups))
+	add := func(name string) {
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		gs := GroupStat{Name: name, Total: s.groups[name], CacheHits: s.groupHits[name]}
+		for upstream, c := range s.ups[name] {
+			gs.Upstreams = append(gs.Upstreams, UpstreamStat{
+				Upstream: upstream,
+				Ok:       c.ok,
+				Failed:   c.failed,
+			})
+			gs.Failed += c.failed
+		}
+		out = append(out, gs)
+	}
+	for name := range s.groups {
+		add(name)
+	}
+	for name := range s.ups {
+		add(name)
+	}
+	s.mu.Unlock()
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Total != out[j].Total {
+			return out[i].Total > out[j].Total
+		}
+		return out[i].Name < out[j].Name
+	})
+	for i := range out {
+		sort.Slice(out[i].Upstreams, func(a, b int) bool {
+			x, y := out[i].Upstreams[a], out[i].Upstreams[b]
+			if tx, ty := x.Ok+x.Failed, y.Ok+y.Failed; tx != ty {
+				return tx > ty
+			}
+			return x.Upstream < y.Upstream
+		})
+	}
+	return out
 }
 
 // DomainsPage возвращает страницу доменов, отсортированных по общему числу

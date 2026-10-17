@@ -46,6 +46,7 @@ func New(d Deps) *Server {
 	s.mux.HandleFunc("/api/stats", s.handleStats)
 	s.mux.HandleFunc("/api/domains", s.handleDomains)
 	s.mux.HandleFunc("/api/domain", s.handleDomain)
+	s.mux.HandleFunc("/api/upstreams", s.handleUpstreams)
 	s.mux.HandleFunc("/api/config", s.handleConfig)
 	s.mux.HandleFunc("/api/cache/flush", s.handleFlush)
 	return s
@@ -128,6 +129,16 @@ func (s *Server) handleDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, info)
+}
+
+// handleUpstreams отдаёт статистику по группам апстримов:
+// GET /api/upstreams
+func (s *Server) handleUpstreams(w http.ResponseWriter, r *http.Request) {
+	items := []stats.GroupStat{}
+	if s.deps.Stats != nil {
+		items = s.deps.Stats.UpstreamsPage()
+	}
+	writeJSON(w, http.StatusOK, map[string][]stats.GroupStat{"items": items})
 }
 
 // queryInt разбирает целочисленный query-параметр, возвращая def при ошибке.

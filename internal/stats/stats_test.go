@@ -61,6 +61,34 @@ func TestRecordCounters(t *testing.T) {
 	}
 }
 
+func TestUpstreamsPage(t *testing.T) {
+	s := newWithClock(0, func() time.Time { return time.Unix(1000, 0) })
+	s.Record("a.test.", "g1", false, info("NOERROR"))
+	s.Record("b.test.", "g1", true, info("NOERROR"))
+	s.Record("c.test.", "g2", false, info("NOERROR"))
+	s.RecordUpstream("g1", "8.8.8.8:53", false)
+	s.RecordUpstream("g1", "1.1.1.1:53", true)
+	s.RecordUpstream("g1", "1.1.1.1:53", false)
+	s.RecordUpstream("g2", "9.9.9.9:53", false)
+	s.RecordUpstream("g2", "9.9.9.9:53", false)
+
+	got := s.UpstreamsPage()
+	if len(got) != 2 {
+		t.Fatalf("groups = %+v", got)
+	}
+	// g1: 2 запроса (1 хит), g2: 1 запрос.
+	if got[0].Name != "g1" || got[0].Total != 2 || got[0].CacheHits != 1 || got[0].Failed != 1 {
+		t.Fatalf("g1 = %+v", got[0])
+	}
+	if len(got[0].Upstreams) != 2 || got[0].Upstreams[0].Upstream != "1.1.1.1:53" ||
+		got[0].Upstreams[0].Ok != 1 || got[0].Upstreams[0].Failed != 1 {
+		t.Fatalf("g1 upstreams = %+v", got[0].Upstreams)
+	}
+	if got[1].Name != "g2" || len(got[1].Upstreams) != 1 || got[1].Upstreams[0].Ok != 2 {
+		t.Fatalf("g2 = %+v", got[1])
+	}
+}
+
 func TestPeakRPMRollover(t *testing.T) {
 	now := time.Unix(0, 0)
 	s := newWithClock(0, func() time.Time { return now })

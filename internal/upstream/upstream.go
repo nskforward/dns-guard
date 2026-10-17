@@ -51,6 +51,13 @@ func New(proto, addr string, bootstrap []string, hosts map[string]string, timeou
 	}
 }
 
+// Attempt — одна попытка обращения к апстриму группы.
+// Err пуст, если сервер ответил успешно.
+type Attempt struct {
+	Upstream string
+	Err      string
+}
+
 // Group — группа апстримов: список основных и резервных серверов.
 // Резервные используются только при ошибке запроса к основным
 // (фоновая проверка доступности не выполняется).
@@ -90,11 +97,12 @@ func NewGroup(name string, g config.Group, timeout time.Duration) (*Group, error
 }
 
 // Exchange отправляет запрос: сначала основные серверы (в ротации),
-// при ошибке всех основных — резервные. Возвращает ответ и адрес ответившего сервера.
-func (g *Group) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, string, error) {
+// при ошибке всех основных — резервные. Возвращает ответ, адрес ответившего
+// сервера и список всех выполненных попыток (в порядке обхода).
+func (g *Group) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, string, []Attempt, error) {
 	servers := append(append([]Resolver{}, g.primary...), g.fallback...)
 	if len(servers) == 0 {
-		return nil, "", fmt.Errorf("no resolvers")
+		return nil, "", nil, fmt.Errorf("no resolvers")
 	}
 	start := 0
 	if n := len(g.primary); n > 0 {
@@ -108,18 +116,21 @@ func (g *Group) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, string, err
 	order = append(order, g.fallback...)
 
 	var lastErr error
+	attempts := make([]Attempt, 0, len(order))
 	for _, r := range order {
 		resp, err := r.Exchange(ctx, m)
 		if err != nil {
 			lastErr = err
+			attempts = append(attempts, Attempt{Upstream: r.String(), Err: err.Error()})
 			continue
 		}
-		return resp, r.String(), nil
+		attempts = append(attempts, Attempt{Upstream: r.String()})
+		return resp, r.String(), attempts, nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("all upstreams failed")
 	}
-	return nil, "", lastErr
+	return nil, "", attempts, lastErr
 }
 
 // Close закрывает все резолверы группы.

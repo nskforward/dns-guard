@@ -23,7 +23,7 @@ import (
 // exchanger — вышестоящая группа, способная обменяться сообщением.
 // Позволяет подменять upstream.Group в тестах.
 type exchanger interface {
-	Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, string, error)
+	Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, string, []upstream.Attempt, error)
 	io.Closer
 }
 
@@ -130,9 +130,9 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	do := hasDO(r)
 
 	if c := s.cache; c != nil && st.cacheEnabled {
-		if msg, ok := c.Get(q, do); ok {
+		if msg, origin, ok := c.Get(q, do); ok {
 			msg.Id = r.Id
-			s.record(q.Name, groupName, true, answerInfo(msg, q.Qtype, "", true))
+			s.record(q.Name, groupName, true, answerInfo(msg, q.Qtype, origin, true))
 			writeReply(w, r, msg)
 			return
 		}
@@ -143,7 +143,8 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	up := r.Copy()
 	up.RecursionDesired = true
-	resp, upstream, err := group.Exchange(ctx, up)
+	resp, origin, attempts, err := group.Exchange(ctx, up)
+	s.recordAttempts(groupName, attempts)
 	if err != nil {
 		s.log.Warn("upstream failed", "name", q.Name, "group", groupName, "err", err)
 		s.record(q.Name, groupName, false, errorInfo(q.Qtype, err.Error()))
@@ -162,9 +163,9 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 	applyTTL(resp, st.minTTL, st.maxTTL)
 	if c := s.cache; c != nil && st.cacheEnabled {
-		c.Put(q, resp)
+		c.Put(q, resp, origin)
 	}
-	s.record(q.Name, groupName, false, answerInfo(resp, q.Qtype, upstream, false))
+	s.record(q.Name, groupName, false, answerInfo(resp, q.Qtype, origin, false))
 	writeReply(w, r, resp)
 }
 
@@ -182,6 +183,16 @@ func (s *Server) record(name, group string, hit bool, info *stats.AnswerInfo) {
 		return
 	}
 	s.stats.Record(name, group, hit, info)
+}
+
+// recordAttempts учитывает попытки обращения к апстримам группы.
+func (s *Server) recordAttempts(group string, attempts []upstream.Attempt) {
+	if s.stats == nil {
+		return
+	}
+	for _, a := range attempts {
+		s.stats.RecordUpstream(group, a.Upstream, a.Err != "")
+	}
 }
 
 // answerInfo описывает выданный ответ для страницы статистики.

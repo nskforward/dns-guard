@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -49,55 +49,75 @@
   .rcode-ok { color:var(--ok); }
   .rcode-warn { color:var(--warn); }
   .rcode-err { color:var(--err); }
+  tr.group-row { cursor:pointer; }
+  tr.group-row:hover td { background:rgba(79,156,249,.08); }
+  tr.detail > td { padding:0; background:var(--bg); }
+  .detail table { margin:0; border:none; border-radius:0; background:transparent; }
+  .detail th, .detail td { padding:6px 12px 6px 34px; border-bottom:1px solid var(--line); }
+  .detail tr:last-child td { border-bottom:none; }
+  .toggle { display:inline-block; width:14px; color:var(--muted); }
+  .fail { color:var(--err); }
 </style>
 </head>
 <body>
 <header>
   <h1>dns-guard</h1>
   <nav>
-    <button id="tab-dash" class="active" onclick="showTab('dash')">Статистика</button>
-    <button id="tab-cfg" onclick="showTab('cfg')">Конфигурация</button>
+    <button id="tab-dash" class="active" onclick="showTab('dash')">Stats</button>
+    <button id="tab-up" onclick="showTab('up')">Upstreams</button>
+    <button id="tab-cfg" onclick="showTab('cfg')">Config</button>
   </nav>
   <span id="status" class="muted" style="margin-left:auto"></span>
 </header>
 <main>
   <section id="view-dash">
     <div class="cards">
-      <div class="card"><div class="k">Запросов</div><div class="v" id="c-total">—</div></div>
-      <div class="card"><div class="k">Из кэша</div><div class="v" id="c-hits">—</div></div>
-      <div class="card"><div class="k">Промахов</div><div class="v" id="c-misses">—</div></div>
+      <div class="card"><div class="k">Requests</div><div class="v" id="c-total">—</div></div>
+      <div class="card"><div class="k">Cache hits</div><div class="v" id="c-hits">—</div></div>
+      <div class="card"><div class="k">Misses</div><div class="v" id="c-misses">—</div></div>
       <div class="card"><div class="k">Hit rate</div><div class="v" id="c-rate">—</div></div>
       <div class="card"><div class="k">SERVFAIL</div><div class="v" id="c-servfail">—</div></div>
-      <div class="card"><div class="k">Доменов</div><div class="v" id="c-domains">—</div></div>
-      <div class="card"><div class="k">Записей в кэше</div><div class="v" id="c-cache">—</div></div>
+      <div class="card"><div class="k">Domains</div><div class="v" id="c-domains">—</div></div>
+      <div class="card"><div class="k">Cache entries</div><div class="v" id="c-cache">—</div></div>
       <div class="card"><div class="k">Uptime</div><div class="v" id="c-uptime">—</div></div>
     </div>
     <div class="row">
-      <h3 style="margin:0">Домены</h3>
-      <button class="act secondary" onclick="flushCache()">Сбросить кэш</button>
+      <h3 style="margin:0">Domains</h3>
+      <button class="act secondary" onclick="flushCache()">Flush cache</button>
     </div>
     <div class="row" style="margin-top:12px">
       <span>
-        <input type="search" id="search" placeholder="Поиск по домену (подстрока)" onkeydown="if (event.key === 'Enter') applySearch()">
-        <button class="act" onclick="applySearch()">Найти</button>
-        <button class="act secondary" onclick="resetSearch()">Сбросить</button>
+        <input type="search" id="search" placeholder="Search by domain (substring)" onkeydown="if (event.key === 'Enter') applySearch()">
+        <button class="act" onclick="applySearch()">Find</button>
+        <button class="act secondary" onclick="resetSearch()">Reset</button>
       </span>
       <span id="domains-total" class="muted"></span>
     </div>
     <table>
-      <thead><tr><th>#</th><th>Домен</th><th class="num">Запросов</th><th class="num">RPM сейчас</th><th class="num">Peak RPM</th></tr></thead>
+      <thead><tr><th>#</th><th>Domain</th><th class="num">Requests</th><th class="num">Current RPM</th><th class="num">Peak RPM</th></tr></thead>
       <tbody id="top"></tbody>
     </table>
     <div id="pager" class="pager"></div>
   </section>
 
+  <section id="view-up" class="hide">
+    <div class="row" style="margin-top:0">
+      <h3 style="margin:0">Upstreams</h3>
+      <span class="muted">Click a group to see its upstream servers.</span>
+    </div>
+    <table>
+      <thead><tr><th>Group</th><th class="num">Requests</th><th class="num">Cache hits</th><th class="num">Upstream OK</th><th class="num">Failed</th><th class="num">Share</th></tr></thead>
+      <tbody id="ups"></tbody>
+    </table>
+  </section>
+
   <section id="view-cfg" class="hide">
     <textarea id="yaml" spellcheck="false"></textarea>
     <div class="row">
-      <span class="muted">Сохранение применяет конфигурацию на лету.</span>
+      <span class="muted">Saving applies the configuration on the fly.</span>
       <span>
-        <button class="act secondary" onclick="loadConfig()">Обновить</button>
-        <button class="act" onclick="saveConfig()">Сохранить</button>
+        <button class="act secondary" onclick="loadConfig()">Reload</button>
+        <button class="act" onclick="saveConfig()">Save</button>
       </span>
     </div>
     <div id="cfg-msg" class="msg"></div>
@@ -108,17 +128,17 @@
   <div class="modal-box" onclick="event.stopPropagation()">
     <div class="row" style="margin-top:0">
       <h3 id="m-title" style="margin:0; word-break:break-all"></h3>
-      <button class="act secondary" onclick="closeModal()">Закрыть</button>
+      <button class="act secondary" onclick="closeModal()">Close</button>
     </div>
     <div id="m-meta" class="muted" style="margin-top:8px"></div>
     <div id="m-last" style="margin-top:12px"></div>
     <div id="m-error" class="msg"></div>
     <div id="m-records-wrap" class="hide">
-      <div class="muted" style="margin-top:12px">Ответ (Answer)</div>
+      <div class="muted" style="margin-top:12px">Answer</div>
       <pre id="m-records"></pre>
     </div>
     <div id="m-auth-wrap" class="hide">
-      <div class="muted" style="margin-top:12px">Authority (Ns)</div>
+      <div class="muted" style="margin-top:12px">Authority (NS)</div>
       <pre id="m-auth"></pre>
     </div>
   </div>
@@ -126,24 +146,31 @@
 
 <script>
 let timer = null;
+let activeTab = 'dash';
 let page = 1;
 let search = '';
 let pages = 0;
+let expandedGroups = new Set();
 const PAGE_SIZE = 50;
 
 function showTab(which) {
-  const dash = which === 'dash';
-  document.getElementById('view-dash').classList.toggle('hide', !dash);
-  document.getElementById('view-cfg').classList.toggle('hide', dash);
-  document.getElementById('tab-dash').classList.toggle('active', dash);
-  document.getElementById('tab-cfg').classList.toggle('active', !dash);
-  if (dash) { refresh(); startTimer(); } else { stopTimer(); loadConfig(); }
+  activeTab = which;
+  document.getElementById('view-dash').classList.toggle('hide', which !== 'dash');
+  document.getElementById('view-up').classList.toggle('hide', which !== 'up');
+  document.getElementById('view-cfg').classList.toggle('hide', which !== 'cfg');
+  document.getElementById('tab-dash').classList.toggle('active', which === 'dash');
+  document.getElementById('tab-up').classList.toggle('active', which === 'up');
+  document.getElementById('tab-cfg').classList.toggle('active', which === 'cfg');
+  if (which === 'cfg') { stopTimer(); loadConfig(); return; }
+  if (which === 'up') { loadUpstreams(); startTimer(); }
+  else { refresh(); startTimer(); }
 }
 
 function startTimer() { stopTimer(); timer = setInterval(refresh, 5000); }
 function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
 
-function fmt(n) { return (n ?? 0).toLocaleString('ru-RU'); }
+function fmt(n) { return (n ?? 0).toLocaleString('en-US'); }
+function pct(part, total) { return total ? Math.round(part * 100 / total) + '%' : '—'; }
 
 function uptime(sec) {
   const d = Math.floor(sec/86400), h = Math.floor(sec%86400/3600), m = Math.floor(sec%3600/60), s = sec%60;
@@ -155,7 +182,8 @@ function uptime(sec) {
 
 async function refresh() {
   await loadStats();
-  await loadDomains();
+  if (activeTab === 'dash') await loadDomains();
+  if (activeTab === 'up') await loadUpstreams();
 }
 
 async function loadStats() {
@@ -174,9 +202,9 @@ async function loadStats() {
     document.getElementById('c-domains').textContent = fmt(d.domains);
     document.getElementById('c-cache').textContent = fmt(d.cache_len);
     document.getElementById('c-uptime').textContent = uptime(d.uptime_seconds || 0);
-    document.getElementById('status').textContent = 'обновлено ' + new Date().toLocaleTimeString('ru-RU');
+    document.getElementById('status').textContent = 'updated ' + new Date().toLocaleTimeString('en-US');
   } catch (e) {
-    document.getElementById('status').textContent = 'ошибка: ' + e.message;
+    document.getElementById('status').textContent = 'error: ' + e.message;
   }
 }
 
@@ -191,7 +219,7 @@ async function loadDomains() {
     renderRows(d.items || []);
     renderPager(d);
   } catch (e) {
-    document.getElementById('status').textContent = 'ошибка: ' + e.message;
+    document.getElementById('status').textContent = 'error: ' + e.message;
   }
 }
 
@@ -203,7 +231,7 @@ function renderRows(items) {
     const td = document.createElement('td');
     td.colSpan = 5;
     td.className = 'muted';
-    td.textContent = search ? 'Ничего не найдено' : 'Пока нет данных';
+    td.textContent = search ? 'Nothing found' : 'No data yet';
     tr.appendChild(td);
     body.appendChild(tr);
     return;
@@ -211,7 +239,7 @@ function renderRows(items) {
   items.forEach((x, i) => {
     const tr = document.createElement('tr');
     tr.className = 'clickable';
-    tr.title = 'Показать последний ответ';
+    tr.title = 'Show last answer';
     tr.innerHTML = '<td class="muted">' + ((page - 1) * PAGE_SIZE + i + 1) + '</td>' +
       '<td class="domain"></td>' +
       '<td class="num">' + fmt(x.total) + '</td>' +
@@ -226,7 +254,7 @@ function renderRows(items) {
 function renderPager(d) {
   const pager = document.getElementById('pager');
   pager.innerHTML = '';
-  document.getElementById('domains-total').textContent = d.total ? 'Всего: ' + fmt(d.total) : '';
+  document.getElementById('domains-total').textContent = d.total ? 'Total: ' + fmt(d.total) : '';
   if (!d.pages) return;
 
   const mk = (label, target, opts = {}) => {
@@ -252,11 +280,11 @@ function renderPager(d) {
   const info = document.createElement('span');
   info.className = 'muted';
   info.style.marginLeft = '8px';
-  info.textContent = 'Стр. ' + d.page + ' из ' + d.pages;
+  info.textContent = 'Page ' + d.page + ' of ' + d.pages;
   pager.appendChild(info);
 }
 
-// pageNumbers возвращает окно номеров страниц с «…» для больших списков.
+// pageNumbers returns a window of page numbers with "…" for large lists.
 function pageNumbers(current, total) {
   if (total <= 9) return Array.from({length: total}, (_, i) => i + 1);
   const set = new Set([1, total, current - 2, current - 1, current, current + 1, current + 2]);
@@ -288,10 +316,91 @@ function resetSearch() {
   loadDomains();
 }
 
+async function loadUpstreams() {
+  try {
+    const r = await fetch('/api/upstreams', {cache:'no-store'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    renderUpstreams(d.items || []);
+  } catch (e) {
+    document.getElementById('status').textContent = 'error: ' + e.message;
+  }
+}
+
+function renderUpstreams(items) {
+  const body = document.getElementById('ups');
+  body.innerHTML = '';
+  if (!items.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 6;
+    td.className = 'muted';
+    td.textContent = 'No data yet';
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+
+  const grandTotal = items.reduce((sum, g) => sum + (g.total || 0), 0);
+
+  items.forEach(g => {
+    const ups = g.upstreams || [];
+    const ok = ups.reduce((sum, u) => sum + (u.ok || 0), 0);
+    const failed = g.failed || 0;
+    const expanded = expandedGroups.has(g.name);
+
+    const tr = document.createElement('tr');
+    tr.className = 'group-row';
+    tr.title = expanded ? 'Collapse upstream servers' : 'Expand upstream servers';
+    tr.innerHTML =
+      '<td><span class="toggle">' + (expanded ? '▾' : '▸') + '</span><b></b></td>' +
+      '<td class="num">' + fmt(g.total) + '</td>' +
+      '<td class="num">' + fmt(g.cache_hits) + '</td>' +
+      '<td class="num">' + fmt(ok) + '</td>' +
+      '<td class="num' + (failed ? ' fail' : '') + '">' + fmt(failed) + '</td>' +
+      '<td class="num">' + pct(g.total, grandTotal) + '</td>';
+    tr.children[0].querySelector('b').textContent = g.name;
+    tr.addEventListener('click', () => {
+      if (expandedGroups.has(g.name)) expandedGroups.delete(g.name);
+      else expandedGroups.add(g.name);
+      renderUpstreams(items);
+    });
+    body.appendChild(tr);
+
+    if (expanded) {
+      const dtr = document.createElement('tr');
+      dtr.className = 'detail';
+      const dtd = document.createElement('td');
+      dtd.colSpan = 6;
+      if (!ups.length) {
+        dtd.innerHTML = '<div class="muted" style="padding:8px 12px 8px 34px">No upstream requests yet.</div>';
+      } else {
+        const t = document.createElement('table');
+        t.innerHTML = '<thead><tr><th>Upstream</th><th class="num">OK</th><th class="num">Failed</th><th class="num">Share</th></tr></thead>';
+        const tb = document.createElement('tbody');
+        ups.forEach(u => {
+          const r2 = document.createElement('tr');
+          r2.innerHTML =
+            '<td></td>' +
+            '<td class="num">' + fmt(u.ok) + '</td>' +
+            '<td class="num' + (u.failed ? ' fail' : '') + '">' + fmt(u.failed) + '</td>' +
+            '<td class="num">' + pct(u.ok, ok) + '</td>';
+          r2.children[0].textContent = u.upstream;
+          tb.appendChild(r2);
+        });
+        t.appendChild(tb);
+        dtd.appendChild(t);
+      }
+      dtr.appendChild(dtd);
+      body.appendChild(dtr);
+    }
+  });
+}
+
 async function showDomain(name) {
   const modal = document.getElementById('modal');
   document.getElementById('m-title').textContent = name;
-  document.getElementById('m-meta').textContent = 'Загрузка…';
+  document.getElementById('m-meta').textContent = 'Loading…';
   document.getElementById('m-last').textContent = '';
   document.getElementById('m-last').className = '';
   const err = document.getElementById('m-error');
@@ -302,7 +411,7 @@ async function showDomain(name) {
   modal.classList.remove('hide');
   try {
     const r = await fetch('/api/domain?name=' + encodeURIComponent(name), {cache:'no-store'});
-    if (!r.ok) throw new Error(r.status === 404 ? 'Нет данных по домену' : 'HTTP ' + r.status);
+    if (!r.ok) throw new Error(r.status === 404 ? 'No data for this domain' : 'HTTP ' + r.status);
     renderDomain(await r.json());
   } catch (e) {
     document.getElementById('m-meta').textContent = '';
@@ -314,7 +423,7 @@ async function showDomain(name) {
 function renderDomain(d) {
   document.getElementById('m-title').textContent = d.domain;
   document.getElementById('m-meta').textContent =
-    'Запросов: ' + fmt(d.total) + ' · RPM сейчас: ' + fmt(d.current_minute) + ' · Peak RPM: ' + fmt(d.peak_rpm);
+    'Requests: ' + fmt(d.total) + ' · Current RPM: ' + fmt(d.current_minute) + ' · Peak RPM: ' + fmt(d.peak_rpm);
 
   const box = document.getElementById('m-last');
   box.innerHTML = '';
@@ -322,25 +431,25 @@ function renderDomain(d) {
   const last = d.last;
   if (!last) {
     box.className = 'muted';
-    box.textContent = 'Последний ответ ещё не зафиксирован.';
+    box.textContent = 'No answer recorded yet.';
     return;
   }
 
   const rcode = document.createElement('div');
   const cls = last.rcode === 'NOERROR' ? 'rcode-ok' : last.rcode === 'NXDOMAIN' ? 'rcode-warn' : 'rcode-err';
-  rcode.innerHTML = 'Ответ: <b class="' + cls + '"></b>';
+  rcode.innerHTML = 'Answer: <b class="' + cls + '"></b>';
   rcode.querySelector('b').textContent = last.rcode || '—';
   box.appendChild(rcode);
 
   const meta = document.createElement('div');
   meta.className = 'muted';
   meta.style.marginTop = '6px';
-  const when = last.at ? new Date(last.at).toLocaleString('ru-RU') : '—';
+  const when = last.at ? new Date(last.at).toLocaleString('en-US') : '—';
   const parts = [
-    'Тип: ' + (last.qtype || '—'),
-    last.from_cache ? 'из кэша' : 'от апстрима',
-    last.upstream ? 'апстрим: ' + last.upstream : '',
-    'время: ' + when
+    'Type: ' + (last.qtype || '—'),
+    last.from_cache ? 'from cache' : 'from upstream',
+    last.upstream ? 'upstream: ' + last.upstream : '',
+    'time: ' + when
   ];
   meta.textContent = parts.filter(Boolean).join(' · ');
   box.appendChild(meta);
@@ -350,7 +459,7 @@ function renderDomain(d) {
   err.textContent = '';
   if (last.error) {
     err.className = 'msg err';
-    err.textContent = 'Ошибка: ' + last.error;
+    err.textContent = 'Error: ' + last.error;
   }
 
   const recWrap = document.getElementById('m-records-wrap');
@@ -380,7 +489,7 @@ function closeModal(ev) {
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 
 async function flushCache() {
-  if (!confirm('Очистить кэш DNS?')) return;
+  if (!confirm('Flush DNS cache?')) return;
   await fetch('/api/cache/flush', {method:'POST'});
   refresh();
 }
@@ -410,7 +519,7 @@ async function saveConfig() {
     if (!r.ok) { msg.className = 'msg err'; msg.textContent = text.trim(); return; }
     const d = JSON.parse(text);
     document.getElementById('yaml').value = d.yaml || '';
-    msg.className = 'msg ok'; msg.textContent = 'Конфигурация сохранена и применена.';
+    msg.className = 'msg ok'; msg.textContent = 'Configuration saved and applied.';
   } catch (e) {
     msg.className = 'msg err'; msg.textContent = e.message;
   }

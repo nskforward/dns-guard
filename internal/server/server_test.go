@@ -13,6 +13,7 @@ import (
 	"github.com/nskforward/dns-guard/internal/config"
 	"github.com/nskforward/dns-guard/internal/rules"
 	"github.com/nskforward/dns-guard/internal/stats"
+	"github.com/nskforward/dns-guard/internal/upstream"
 )
 
 // fakeExchanger — подменная вышестоящая группа.
@@ -23,13 +24,13 @@ type fakeExchanger struct {
 	calls int
 }
 
-func (f *fakeExchanger) Exchange(_ context.Context, m *dns.Msg) (*dns.Msg, string, error) {
+func (f *fakeExchanger) Exchange(_ context.Context, m *dns.Msg) (*dns.Msg, string, []upstream.Attempt, error) {
 	f.calls++
 	f.last = m
 	if f.err != nil {
-		return nil, "", f.err
+		return nil, "", []upstream.Attempt{{Upstream: "fake", Err: f.err.Error()}}, f.err
 	}
-	return f.resp.Copy(), "fake", nil
+	return f.resp.Copy(), "fake", []upstream.Attempt{{Upstream: "fake"}}, nil
 }
 
 func (f *fakeExchanger) Close() error { return nil }
@@ -130,6 +131,19 @@ func TestServeDNSMissThenHit(t *testing.T) {
 	if info.Last.Rcode != "NOERROR" || !info.Last.FromCache || len(info.Last.Records) != 1 {
 		t.Fatalf("last = %+v", info.Last)
 	}
+	// Даже для ответа из кэша сохраняется исходный апстрим.
+	if info.Last.Upstream != "fake" {
+		t.Fatalf("cached last upstream = %q, want fake", info.Last.Upstream)
+	}
+
+	// Попытка к апстриму учтена ровно один раз (второй запрос — из кэша).
+	groups := ss.UpstreamsPage()
+	if len(groups) != 1 || groups[0].Name != "a" || groups[0].Total != 2 || groups[0].CacheHits != 1 {
+		t.Fatalf("groups = %+v", groups)
+	}
+	if len(groups[0].Upstreams) != 1 || groups[0].Upstreams[0].Upstream != "fake" || groups[0].Upstreams[0].Ok != 1 {
+		t.Fatalf("upstreams = %+v", groups[0].Upstreams)
+	}
 }
 
 func TestServeDNSAppliesMinTTL(t *testing.T) {
@@ -172,6 +186,11 @@ func TestServeDNSServfailOnUpstreamError(t *testing.T) {
 	}
 	if ss.Snapshot().Servfail != 1 {
 		t.Fatalf("servfail counter not incremented")
+	}
+	groups := ss.UpstreamsPage()
+	if len(groups) != 1 || groups[0].Failed != 1 || len(groups[0].Upstreams) != 1 ||
+		groups[0].Upstreams[0].Failed != 1 || groups[0].Upstreams[0].Ok != 0 {
+		t.Fatalf("upstream failure not recorded: %+v", groups)
 	}
 }
 

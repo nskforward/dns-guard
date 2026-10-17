@@ -71,6 +71,36 @@ func TestDomainsAPI(t *testing.T) {
 	}
 }
 
+func TestUpstreamsAPI(t *testing.T) {
+	st := stats.New(0)
+	st.Record("a.example.com.", "g1", false, nil)
+	st.Record("b.example.com.", "g1", true, nil)
+	st.Record("c.example.com.", "g2", false, nil)
+	st.RecordUpstream("g1", "1.1.1.1:53", false)
+	st.RecordUpstream("g1", "8.8.8.8:53", true)
+	st.RecordUpstream("g2", "9.9.9.9:53", false)
+
+	h := New(Deps{Stats: st}).Handler()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/upstreams", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Items []stats.GroupStat `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Items) != 2 {
+		t.Fatalf("items = %+v", body.Items)
+	}
+	if body.Items[0].Name != "g1" || body.Items[0].Total != 2 || body.Items[0].CacheHits != 1 ||
+		body.Items[0].Failed != 1 || len(body.Items[0].Upstreams) != 2 {
+		t.Fatalf("g1 = %+v", body.Items[0])
+	}
+}
+
 func TestStatsAPIWithoutTop(t *testing.T) {
 	st := stats.New(0)
 	st.Record("a.example.com.", "g", false, nil)

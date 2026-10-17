@@ -58,7 +58,7 @@ func TestGroupMixedProtocolFallback(t *testing.T) {
 
 	q := new(dns.Msg)
 	q.SetQuestion("example.com.", dns.TypeA)
-	resp, addr, err := grp.Exchange(context.Background(), q)
+	resp, addr, attempts, err := grp.Exchange(context.Background(), q)
 	if err != nil {
 		t.Fatalf("exchange: %v", err)
 	}
@@ -67,5 +67,9 @@ func TestGroupMixedProtocolFallback(t *testing.T) {
 	}
 	if !strings.HasPrefix(addr, "http") {
 		t.Fatalf("ответил %q, ожидался DoH-fallback", addr)
+	}
+	// Две попытки: неудачный primary и успешный DoH-fallback.
+	if len(attempts) != 2 || attempts[0].Err == "" || attempts[1].Err != "" {
+		t.Fatalf("attempts = %+v", attempts)
 	}
 }

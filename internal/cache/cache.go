@@ -13,11 +13,12 @@ import (
 )
 
 type entry struct {
-	key     string
-	msg     *dns.Msg
-	stored  time.Time
-	expires time.Time
-	elem    *list.Element
+	key      string
+	msg      *dns.Msg
+	upstream string
+	stored   time.Time
+	expires  time.Time
+	elem     *list.Element
 }
 
 // Cache — потокобезопасный LRU-кэш DNS-сообщений.
@@ -62,29 +63,32 @@ func key(q dns.Question, do bool) string {
 	return fmt.Sprintf("%s|%d|%d|%s", strings.ToLower(q.Name), q.Qtype, q.Qclass, doBit)
 }
 
-// Get возвращает копию закэшированного ответа с уменьшенными TTL.
-func (c *Cache) Get(q dns.Question, do bool) (*dns.Msg, bool) {
+// Get возвращает копию закэшированного ответа с уменьшенными TTL и адрес
+// апстрима, от которого ответ был получен изначально (пустая строка, если не
+// известен).
+func (c *Cache) Get(q dns.Question, do bool) (*dns.Msg, string, bool) {
 	k := key(q, do)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[k]
 	if !ok {
-		return nil, false
+		return nil, "", false
 	}
 	now := c.now()
 	if now.After(e.expires) {
 		c.removeElem(e)
-		return nil, false
+		return nil, "", false
 	}
 	c.lru.MoveToFront(e.elem)
 	out := e.msg.Copy()
 	elapsed := uint32(now.Sub(e.stored).Seconds())
 	decTTL(out, elapsed)
-	return out, true
+	return out, e.upstream, true
 }
 
 // Put сохраняет ответ (предварительно применив границы TTL).
-func (c *Cache) Put(q dns.Question, m *dns.Msg) {
+// upstream — адрес сервера, выдавшего ответ (может быть пустым).
+func (c *Cache) Put(q dns.Question, m *dns.Msg, upstream string) {
 	if m == nil || m.Truncated {
 		return
 	}
@@ -109,10 +113,11 @@ func (c *Cache) Put(q dns.Question, m *dns.Msg) {
 		c.removeElem(old)
 	}
 	e := &entry{
-		key:     k,
-		msg:     stored,
-		stored:  now,
-		expires: now.Add(time.Duration(ttl) * time.Second),
+		key:      k,
+		msg:      stored,
+		upstream: upstream,
+		stored:   now,
+		expires:  now.Add(time.Duration(ttl) * time.Second),
 	}
 	e.elem = c.lru.PushFront(e)
 	c.entries[k] = e
