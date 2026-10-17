@@ -7,6 +7,7 @@
 package stats
 
 import (
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -23,6 +24,8 @@ const (
 	MaxPageSize = 500
 	// servfailEventsCap — сколько последних SERVFAIL-событий хранить в журнале.
 	servfailEventsCap = 100
+	// latencySamples — сколько последних длительностей апстрима хранить для p90.
+	latencySamples = 256
 )
 
 // DomainStat — статистика по полному доменному имени.
@@ -35,14 +38,15 @@ type DomainStat struct {
 
 // AnswerInfo — сведения о последнем ответе, выданном по домену.
 type AnswerInfo struct {
-	Rcode     string    `json:"rcode"`
-	Qtype     string    `json:"qtype"`
-	Records   []string  `json:"records,omitempty"`   // секция Answer
-	Authority []string  `json:"authority,omitempty"` // секция Ns (обычно SOA)
-	Error     string    `json:"error,omitempty"`
-	Upstream  string    `json:"upstream,omitempty"`
-	FromCache bool      `json:"from_cache"`
-	At        time.Time `json:"at"`
+	Rcode      string    `json:"rcode"`
+	Qtype      string    `json:"qtype"`
+	Records    []string  `json:"records,omitempty"`   // секция Answer
+	Authority  []string  `json:"authority,omitempty"` // секция Ns (обычно SOA)
+	Error      string    `json:"error,omitempty"`
+	Upstream   string    `json:"upstream,omitempty"`
+	FromCache  bool      `json:"from_cache"`
+	DurationMs float64   `json:"duration_ms,omitempty"` // время запроса через апстрим, мс
+	At         time.Time `json:"at"`
 }
 
 // DomainInfo — статистика домена вместе с последним ответом.
@@ -53,9 +57,10 @@ type DomainInfo struct {
 
 // UpstreamStat — счётчики попыток одного апстрима в группе.
 type UpstreamStat struct {
-	Upstream string `json:"upstream"`
-	Ok       uint64 `json:"ok"`
-	Failed   uint64 `json:"failed"`
+	Upstream string  `json:"upstream"`
+	Ok       uint64  `json:"ok"`
+	Failed   uint64  `json:"failed"`
+	P90Ms    float64 `json:"p90_ms,omitempty"` // 90-й перцентиль длительности, мс
 }
 
 // GroupStat — статистика по группе апстримов: запросы, кэш-хиты и разбивка
@@ -135,8 +140,38 @@ type domain struct {
 
 // upstreamCounters — счётчики попыток одного апстрима.
 type upstreamCounters struct {
-	ok     uint64
-	failed uint64
+	ok      uint64
+	failed  uint64
+	latency [latencySamples]float64 // кольцевой буфер длительностей, мс
+	latN    int                     // заполнено слотов (<= latencySamples)
+	latPos  int                     // следующий слот для записи
+}
+
+// addLatency сохраняет длительность попытки в кольцевом буфере.
+func (c *upstreamCounters) addLatency(ms float64) {
+	c.latency[c.latPos] = ms
+	c.latPos++
+	if c.latPos == latencySamples {
+		c.latPos = 0
+	}
+	if c.latN < latencySamples {
+		c.latN++
+	}
+}
+
+// p90 возвращает 90-й перцентиль накопленных длительностей (метод nearest-rank).
+func (c *upstreamCounters) p90() float64 {
+	if c.latN == 0 {
+		return 0
+	}
+	buf := make([]float64, c.latN)
+	copy(buf, c.latency[:c.latN])
+	sort.Float64s(buf)
+	idx := int(math.Ceil(0.9*float64(len(buf)))) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	return buf[idx]
 }
 
 // Stats — потокобезопасный сборщик статистики.
@@ -264,8 +299,9 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 }
 
 // RecordUpstream учитывает одну попытку обращения к апстриму группы.
-// failed — сервер не дал ответа (таймаут, сетевая ошибка и т.п.).
-func (s *Stats) RecordUpstream(group, upstream string, failed bool) {
+// failed — сервер не дал ответа (таймаут, сетевая ошибка и т.п.);
+// elapsed — длительность попытки.
+func (s *Stats) RecordUpstream(group, upstream string, failed bool, elapsed time.Duration) {
 	if group == "" || upstream == "" {
 		return
 	}
@@ -286,6 +322,7 @@ func (s *Stats) RecordUpstream(group, upstream string, failed bool) {
 	} else {
 		c.ok++
 	}
+	c.addLatency(float64(elapsed) / float64(time.Millisecond))
 }
 
 // UpstreamsPage возвращает статистику по группам апстримов: группы по убыванию
@@ -305,6 +342,7 @@ func (s *Stats) UpstreamsPage() []GroupStat {
 				Upstream: upstream,
 				Ok:       c.ok,
 				Failed:   c.failed,
+				P90Ms:    c.p90(),
 			})
 			gs.Failed += c.failed
 		}

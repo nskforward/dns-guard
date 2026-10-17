@@ -52,6 +52,9 @@
   .rcode-ok { color:var(--ok); }
   .rcode-warn { color:var(--warn); }
   .rcode-err { color:var(--err); }
+  .meta-list { display:grid; grid-template-columns:max-content 1fr; gap:4px 16px; margin-top:8px; }
+  .meta-list .mk { color:var(--muted); }
+  .meta-list .mv { word-break:break-all; }
   tr.group-row { cursor:pointer; }
   tr.group-row:hover td { background:rgba(79,156,249,.08); }
   tr.detail > td { padding:0; background:var(--bg); }
@@ -203,6 +206,7 @@ function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
 
 function fmt(n) { return (n ?? 0).toLocaleString('en-US'); }
 function pct(part, total) { return total ? Math.round(part * 100 / total) + '%' : '—'; }
+function fmtDuration(ms) { return ms >= 1000 ? (ms / 1000).toFixed(2) + ' s' : ms.toFixed(1) + ' ms'; }
 
 function uptime(sec) {
   const d = Math.floor(sec/86400), h = Math.floor(sec%86400/3600), m = Math.floor(sec%3600/60), s = sec%60;
@@ -515,7 +519,7 @@ function renderUpstreams(items) {
         dtd.innerHTML = '<div class="muted" style="padding:8px 12px 8px 34px">No upstream requests yet.</div>';
       } else {
         const t = document.createElement('table');
-        t.innerHTML = '<thead><tr><th>Upstream</th><th class="num">OK</th><th class="num">Failed</th><th class="num">Share</th></tr></thead>';
+        t.innerHTML = '<thead><tr><th>Upstream</th><th class="num">OK</th><th class="num">Failed</th><th class="num">p90</th><th class="num">Share</th></tr></thead>';
         const tb = document.createElement('tbody');
         ups.forEach(u => {
           const r2 = document.createElement('tr');
@@ -523,6 +527,7 @@ function renderUpstreams(items) {
             '<td></td>' +
             '<td class="num">' + fmt(u.ok) + '</td>' +
             '<td class="num' + (u.failed ? ' fail' : '') + '">' + fmt(u.failed) + '</td>' +
+            '<td class="num">' + (u.p90_ms > 0 ? fmtDuration(u.p90_ms) : '—') + '</td>' +
             '<td class="num">' + pct(u.ok, ok) + '</td>';
           r2.children[0].textContent = u.upstream;
           tb.appendChild(r2);
@@ -577,20 +582,30 @@ function renderDomain(d) {
   const rcode = document.createElement('div');
   const cls = last.rcode === 'NOERROR' ? 'rcode-ok' : last.rcode === 'NXDOMAIN' ? 'rcode-warn' : 'rcode-err';
   rcode.innerHTML = 'Answer: <b class="' + cls + '"></b>';
-  rcode.querySelector('b').textContent = last.rcode || '—';
+  rcode.querySelector('b').textContent = last.rcode === 'NOERROR' ? 'OK' : (last.rcode || '—');
   box.appendChild(rcode);
 
-  const meta = document.createElement('div');
-  meta.className = 'muted';
-  meta.style.marginTop = '6px';
   const when = last.at ? new Date(last.at).toLocaleString('en-US') : '—';
-  const parts = [
-    'Type: ' + (last.qtype || '—'),
-    last.from_cache ? 'from cache' : 'from upstream',
-    last.upstream ? 'upstream: ' + last.upstream : '',
-    'time: ' + when
+  const rows = [
+    ['Type', last.qtype || '—'],
+    ['Source', last.from_cache ? 'cache' : 'upstream'],
   ];
-  meta.textContent = parts.filter(Boolean).join(' · ');
+  if (last.upstream) rows.push(['Upstream', last.upstream]);
+  if (!last.from_cache && last.duration_ms > 0) rows.push(['Duration', fmtDuration(last.duration_ms)]);
+  rows.push(['Time', when]);
+
+  const meta = document.createElement('div');
+  meta.className = 'meta-list';
+  rows.forEach(([k, v]) => {
+    const kd = document.createElement('div');
+    kd.className = 'mk';
+    kd.textContent = k;
+    const vd = document.createElement('div');
+    vd.className = 'mv';
+    vd.textContent = v;
+    meta.appendChild(kd);
+    meta.appendChild(vd);
+  });
   box.appendChild(meta);
 
   const err = document.getElementById('m-error');

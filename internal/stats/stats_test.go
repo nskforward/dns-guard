@@ -66,11 +66,11 @@ func TestUpstreamsPage(t *testing.T) {
 	s.Record("a.test.", "g1", false, info("NOERROR"))
 	s.Record("b.test.", "g1", true, info("NOERROR"))
 	s.Record("c.test.", "g2", false, info("NOERROR"))
-	s.RecordUpstream("g1", "8.8.8.8:53", false)
-	s.RecordUpstream("g1", "1.1.1.1:53", true)
-	s.RecordUpstream("g1", "1.1.1.1:53", false)
-	s.RecordUpstream("g2", "9.9.9.9:53", false)
-	s.RecordUpstream("g2", "9.9.9.9:53", false)
+	s.RecordUpstream("g1", "8.8.8.8:53", false, 10*time.Millisecond)
+	s.RecordUpstream("g1", "1.1.1.1:53", true, 200*time.Millisecond)
+	s.RecordUpstream("g1", "1.1.1.1:53", false, 20*time.Millisecond)
+	s.RecordUpstream("g2", "9.9.9.9:53", false, 5*time.Millisecond)
+	s.RecordUpstream("g2", "9.9.9.9:53", false, 7*time.Millisecond)
 
 	got := s.UpstreamsPage()
 	if len(got) != 2 {
@@ -84,8 +84,45 @@ func TestUpstreamsPage(t *testing.T) {
 		got[0].Upstreams[0].Ok != 1 || got[0].Upstreams[0].Failed != 1 {
 		t.Fatalf("g1 upstreams = %+v", got[0].Upstreams)
 	}
+	// p90 учитывает и неудачные попытки: из {200, 20} мс p90 = 200.
+	if p := got[0].Upstreams[0].P90Ms; p != 200 {
+		t.Fatalf("1.1.1.1 p90 = %v, want 200", p)
+	}
 	if got[1].Name != "g2" || len(got[1].Upstreams) != 1 || got[1].Upstreams[0].Ok != 2 {
 		t.Fatalf("g2 = %+v", got[1])
+	}
+	if p := got[1].Upstreams[0].P90Ms; p != 7 {
+		t.Fatalf("9.9.9.9 p90 = %v, want 7", p)
+	}
+}
+
+func TestUpstreamP90(t *testing.T) {
+	s := newWithClock(0, func() time.Time { return time.Unix(0, 0) })
+	for i := 1; i <= 10; i++ {
+		s.RecordUpstream("g", "u", false, time.Duration(i)*time.Millisecond)
+	}
+	p90 := func() float64 { return s.UpstreamsPage()[0].Upstreams[0].P90Ms }
+	// nearest-rank: ceil(0.9*10) = 9-й элемент отсортированного ряда.
+	if got := p90(); got != 9 {
+		t.Fatalf("p90 = %v, want 9", got)
+	}
+
+	// Неудачная попытка с большой задержкой тоже входит в выборку:
+	// 11 значений, ceil(0.9*11) = 10 -> 10-й элемент = 10 мс.
+	s.RecordUpstream("g", "u", true, 500*time.Millisecond)
+	if got := p90(); got != 10 {
+		t.Fatalf("p90 after failure = %v, want 10", got)
+	}
+
+	// Кольцевой буфер хранит только последние latencySamples значений:
+	// после 300 записей остаются 45..300, p90 = 275.
+	s2 := newWithClock(0, func() time.Time { return time.Unix(0, 0) })
+	for i := 1; i <= 300; i++ {
+		s2.RecordUpstream("g", "u", false, time.Duration(i)*time.Millisecond)
+	}
+	got := s2.UpstreamsPage()[0].Upstreams[0]
+	if got.P90Ms != 275 {
+		t.Fatalf("ring p90 = %v, want 275", got.P90Ms)
 	}
 }
 
@@ -357,10 +394,11 @@ func TestDomainInfoLastAnswer(t *testing.T) {
 		Upstream: "1.1.1.1:53",
 	})
 	s.Record("api.example.com.", "g", true, &AnswerInfo{
-		Rcode:     "NXDOMAIN",
-		Qtype:     "AAAA",
-		Authority: []string{"example.com. 60 IN SOA ns. hostmaster. 1 2 3 4 60"},
-		FromCache: true,
+		Rcode:      "NXDOMAIN",
+		Qtype:      "AAAA",
+		Authority:  []string{"example.com. 60 IN SOA ns. hostmaster. 1 2 3 4 60"},
+		FromCache:  true,
+		DurationMs: 34.5,
 	})
 
 	di, ok := s.DomainInfo("API.EXAMPLE.COM")
@@ -375,6 +413,9 @@ func TestDomainInfoLastAnswer(t *testing.T) {
 	}
 	if di.Last.Rcode != "NXDOMAIN" || di.Last.Qtype != "AAAA" || !di.Last.FromCache {
 		t.Fatalf("last = %+v", di.Last)
+	}
+	if di.Last.DurationMs != 34.5 {
+		t.Fatalf("last.DurationMs = %v, want 34.5", di.Last.DurationMs)
 	}
 	if len(di.Last.Authority) != 1 || len(di.Last.Records) != 0 {
 		t.Fatalf("last sections = %+v", di.Last)

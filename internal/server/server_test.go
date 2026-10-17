@@ -28,9 +28,9 @@ func (f *fakeExchanger) Exchange(_ context.Context, m *dns.Msg) (*dns.Msg, strin
 	f.calls++
 	f.last = m
 	if f.err != nil {
-		return nil, "", []upstream.Attempt{{Upstream: "fake", Err: f.err.Error()}}, f.err
+		return nil, "", []upstream.Attempt{{Upstream: "fake", Err: f.err.Error(), Elapsed: time.Millisecond}}, f.err
 	}
-	return f.resp.Copy(), "fake", []upstream.Attempt{{Upstream: "fake"}}, nil
+	return f.resp.Copy(), "fake", []upstream.Attempt{{Upstream: "fake", Elapsed: time.Millisecond}}, nil
 }
 
 func (f *fakeExchanger) Close() error { return nil }
@@ -143,6 +143,9 @@ func TestServeDNSMissThenHit(t *testing.T) {
 	}
 	if len(groups[0].Upstreams) != 1 || groups[0].Upstreams[0].Upstream != "fake" || groups[0].Upstreams[0].Ok != 1 {
 		t.Fatalf("upstreams = %+v", groups[0].Upstreams)
+	}
+	if p := groups[0].Upstreams[0].P90Ms; p != 1 {
+		t.Fatalf("upstream p90 = %v ms, want 1", p)
 	}
 }
 

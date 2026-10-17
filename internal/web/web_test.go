@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/nskforward/dns-guard/internal/stats"
 )
@@ -76,9 +77,9 @@ func TestUpstreamsAPI(t *testing.T) {
 	st.Record("a.example.com.", "g1", false, nil)
 	st.Record("b.example.com.", "g1", true, nil)
 	st.Record("c.example.com.", "g2", false, nil)
-	st.RecordUpstream("g1", "1.1.1.1:53", false)
-	st.RecordUpstream("g1", "8.8.8.8:53", true)
-	st.RecordUpstream("g2", "9.9.9.9:53", false)
+	st.RecordUpstream("g1", "1.1.1.1:53", false, 10*time.Millisecond)
+	st.RecordUpstream("g1", "8.8.8.8:53", true, 100*time.Millisecond)
+	st.RecordUpstream("g2", "9.9.9.9:53", false, 5*time.Millisecond)
 
 	h := New(Deps{Stats: st}).Handler()
 	rec := httptest.NewRecorder()
@@ -98,6 +99,11 @@ func TestUpstreamsAPI(t *testing.T) {
 	if body.Items[0].Name != "g1" || body.Items[0].Total != 2 || body.Items[0].CacheHits != 1 ||
 		body.Items[0].Failed != 1 || len(body.Items[0].Upstreams) != 2 {
 		t.Fatalf("g1 = %+v", body.Items[0])
+	}
+	for _, u := range body.Items[0].Upstreams {
+		if u.Upstream == "1.1.1.1:53" && u.P90Ms != 10 {
+			t.Fatalf("1.1.1.1 p90 = %v, want 10", u.P90Ms)
+		}
 	}
 }
 

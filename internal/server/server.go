@@ -132,7 +132,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if c := s.cache; c != nil && st.cacheEnabled {
 		if msg, origin, ok := c.Get(q, do); ok {
 			msg.Id = r.Id
-			s.record(q.Name, groupName, true, answerInfo(msg, q.Qtype, origin, true))
+			s.record(q.Name, groupName, true, answerInfo(msg, q.Qtype, origin, true, 0))
 			writeReply(w, r, msg)
 			return
 		}
@@ -143,16 +143,18 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	up := r.Copy()
 	up.RecursionDesired = true
+	exchangeStart := time.Now()
 	resp, origin, attempts, err := group.Exchange(ctx, up)
+	elapsed := time.Since(exchangeStart)
 	s.recordAttempts(groupName, attempts)
 	if err != nil {
 		s.log.Warn("upstream failed", "name", q.Name, "group", groupName, "err", err)
-		s.record(q.Name, groupName, false, errorInfo(q.Qtype, err.Error()))
+		s.record(q.Name, groupName, false, errorInfo(q.Qtype, err.Error(), elapsed))
 		answer(w, r, dns.RcodeServerFailure)
 		return
 	}
 	if resp == nil {
-		s.record(q.Name, groupName, false, errorInfo(q.Qtype, ""))
+		s.record(q.Name, groupName, false, errorInfo(q.Qtype, "", elapsed))
 		answer(w, r, dns.RcodeServerFailure)
 		return
 	}
@@ -165,7 +167,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if c := s.cache; c != nil && st.cacheEnabled {
 		c.Put(q, resp, origin)
 	}
-	s.record(q.Name, groupName, false, answerInfo(resp, q.Qtype, origin, false))
+	s.record(q.Name, groupName, false, answerInfo(resp, q.Qtype, origin, false, elapsed))
 	writeReply(w, r, resp)
 }
 
@@ -191,17 +193,18 @@ func (s *Server) recordAttempts(group string, attempts []upstream.Attempt) {
 		return
 	}
 	for _, a := range attempts {
-		s.stats.RecordUpstream(group, a.Upstream, a.Err != "")
+		s.stats.RecordUpstream(group, a.Upstream, a.Err != "", a.Elapsed)
 	}
 }
 
 // answerInfo описывает выданный ответ для страницы статистики.
-func answerInfo(m *dns.Msg, qtype uint16, upstream string, fromCache bool) *stats.AnswerInfo {
+func answerInfo(m *dns.Msg, qtype uint16, upstream string, fromCache bool, elapsed time.Duration) *stats.AnswerInfo {
 	info := &stats.AnswerInfo{
-		Rcode:     rcodeName(m.Rcode),
-		Qtype:     typeName(qtype),
-		Upstream:  upstream,
-		FromCache: fromCache,
+		Rcode:      rcodeName(m.Rcode),
+		Qtype:      typeName(qtype),
+		Upstream:   upstream,
+		FromCache:  fromCache,
+		DurationMs: float64(elapsed) / float64(time.Millisecond),
 	}
 	for _, rr := range m.Answer {
 		if _, ok := rr.(*dns.OPT); ok {
@@ -219,11 +222,12 @@ func answerInfo(m *dns.Msg, qtype uint16, upstream string, fromCache bool) *stat
 }
 
 // errorInfo описывает ответ, сформированный при ошибке апстрима.
-func errorInfo(qtype uint16, msg string) *stats.AnswerInfo {
+func errorInfo(qtype uint16, msg string, elapsed time.Duration) *stats.AnswerInfo {
 	return &stats.AnswerInfo{
-		Rcode: "SERVFAIL",
-		Qtype: typeName(qtype),
-		Error: msg,
+		Rcode:      "SERVFAIL",
+		Qtype:      typeName(qtype),
+		Error:      msg,
+		DurationMs: float64(elapsed) / float64(time.Millisecond),
 	}
 }
 

@@ -52,10 +52,11 @@ func New(proto, addr string, bootstrap []string, hosts map[string]string, timeou
 }
 
 // Attempt — одна попытка обращения к апстриму группы.
-// Err пуст, если сервер ответил успешно.
+// Err пуст, если сервер ответил успешно; Elapsed — длительность попытки.
 type Attempt struct {
 	Upstream string
 	Err      string
+	Elapsed  time.Duration
 }
 
 // Group — группа апстримов: список основных и резервных серверов.
@@ -118,13 +119,15 @@ func (g *Group) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, string, []A
 	var lastErr error
 	attempts := make([]Attempt, 0, len(order))
 	for _, r := range order {
+		attemptStart := time.Now()
 		resp, err := r.Exchange(ctx, m)
+		elapsed := time.Since(attemptStart)
 		if err != nil {
 			lastErr = err
-			attempts = append(attempts, Attempt{Upstream: r.String(), Err: err.Error()})
+			attempts = append(attempts, Attempt{Upstream: r.String(), Err: err.Error(), Elapsed: elapsed})
 			continue
 		}
-		attempts = append(attempts, Attempt{Upstream: r.String()})
+		attempts = append(attempts, Attempt{Upstream: r.String(), Elapsed: elapsed})
 		return resp, r.String(), attempts, nil
 	}
 	if lastErr == nil {
