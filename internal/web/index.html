@@ -59,6 +59,11 @@
   .answer-card { border-top:1px solid var(--line); padding-top:12px; margin-top:12px; }
   .answer-card:first-child { border-top:none; padding-top:0; margin-top:0; }
   .answer-card .sub { color:var(--muted); margin-top:10px; }
+  .attempt-list { margin-top:4px; font:12px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .attempt { display:flex; gap:12px; align-items:baseline; }
+  .attempt .a-up { flex:1; word-break:break-all; }
+  .attempt .a-st { min-width:72px; text-align:right; }
+  .attempt .a-dur { min-width:56px; text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }
   tr.group-row { cursor:pointer; }
   tr.group-row:hover td { background:rgba(79,156,249,.08); }
   tr.detail > td { padding:0; background:var(--bg); }
@@ -569,12 +574,14 @@ function renderDomain(d) {
   const box = document.getElementById('m-last');
   box.innerHTML = '';
   box.className = '';
-  if (!d.answer) {
+  const negative = d.negative || [];
+  if (!d.answer && !negative.length) {
     box.className = 'muted';
-    box.textContent = 'No successful answer recorded yet.';
+    box.textContent = 'No answer recorded yet.';
     return;
   }
-  box.appendChild(renderAnswer(d.answer));
+  if (d.answer) box.appendChild(renderAnswer(d.answer));
+  negative.forEach(n => box.appendChild(renderNegative(n)));
 }
 
 function renderAnswer(last) {
@@ -590,7 +597,45 @@ function renderAnswer(last) {
   if (last.upstream) rows.push(['Upstream', last.upstream]);
   if (!last.from_cache && last.duration_ms > 0) rows.push(['Duration', fmtDuration(last.duration_ms)]);
   rows.push(['Time', when]);
+  card.appendChild(renderMeta(rows));
 
+  card.appendChild(subLabel('Answer'));
+  card.appendChild(preBlock(last.records || []));
+  if (last.authority && last.authority.length) {
+    card.appendChild(subLabel('Authority (NS)'));
+    card.appendChild(preBlock(last.authority));
+  }
+  appendAttempts(card, last);
+  return card;
+}
+
+// renderNegative — карточка негативного ответа (NODATA/NXDOMAIN): те же
+// атрибуты, что у успешного, плюс тип запроса и цепочка пройденных апстримов.
+function renderNegative(last) {
+  const card = document.createElement('div');
+  card.className = 'answer-card';
+
+  const when = last.at ? new Date(last.at).toLocaleString('en-US') : '—';
+  const nodata = last.rcode === 'NOERROR';
+  const rows = [
+    ['Status', nodata ? 'NODATA' : (last.rcode || '—'), nodata ? 'rcode-warn' : 'rcode-err'],
+    ['Type', last.qtype || '—'],
+    ['Source', last.from_cache ? 'cache' : 'upstream'],
+  ];
+  if (last.upstream) rows.push(['Upstream', last.upstream]);
+  if (!last.from_cache && last.duration_ms > 0) rows.push(['Duration', fmtDuration(last.duration_ms)]);
+  rows.push(['Time', when]);
+  card.appendChild(renderMeta(rows));
+
+  if (last.authority && last.authority.length) {
+    card.appendChild(subLabel('Authority (NS)'));
+    card.appendChild(preBlock(last.authority));
+  }
+  appendAttempts(card, last);
+  return card;
+}
+
+function renderMeta(rows) {
   const meta = document.createElement('div');
   meta.className = 'meta-list';
   rows.forEach(([k, v, cls]) => {
@@ -604,15 +649,37 @@ function renderAnswer(last) {
     meta.appendChild(kd);
     meta.appendChild(vd);
   });
-  card.appendChild(meta);
+  return meta;
+}
 
-  card.appendChild(subLabel('Answer'));
-  card.appendChild(preBlock(last.records || []));
-  if (last.authority && last.authority.length) {
-    card.appendChild(subLabel('Authority (NS)'));
-    card.appendChild(preBlock(last.authority));
-  }
-  return card;
+// appendAttempts выводит цепочку апстримов, к которым ходили при промахе
+// кэша: порядок обхода, итог каждой попытки и её длительность.
+function appendAttempts(card, last) {
+  if (!last.attempts || !last.attempts.length) return;
+  card.appendChild(subLabel('Upstreams tried'));
+  const list = document.createElement('div');
+  list.className = 'attempt-list';
+  last.attempts.forEach((a, i) => {
+    const row = document.createElement('div');
+    row.className = 'attempt';
+    const up = document.createElement('span');
+    up.className = 'a-up';
+    up.textContent = (i + 1) + '. ' + a.upstream;
+    const st = document.createElement('span');
+    st.className = 'a-st';
+    st.textContent = a.error || a.status || '—';
+    if (a.error || a.status === 'ERROR' || a.status === 'SERVFAIL') st.classList.add('rcode-err');
+    else if (a.status === 'NODATA' || a.status === 'NXDOMAIN') st.classList.add('rcode-warn');
+    else if (a.status === 'OK') st.classList.add('rcode-ok');
+    const dur = document.createElement('span');
+    dur.className = 'a-dur';
+    dur.textContent = a.duration_ms > 0 ? fmtDuration(a.duration_ms) : '';
+    row.appendChild(up);
+    row.appendChild(st);
+    row.appendChild(dur);
+    list.appendChild(row);
+  });
+  card.appendChild(list);
 }
 
 function subLabel(text) {

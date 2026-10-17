@@ -98,6 +98,41 @@ func TestDomainsAPI(t *testing.T) {
 	}
 }
 
+func TestDomainNegativeAPI(t *testing.T) {
+	st := stats.New(0)
+	st.Record("nx.example.com.", "g", false, &stats.AnswerInfo{
+		Rcode: "NOERROR",
+		Qtype: "AAAA",
+		Attempts: []stats.AttemptInfo{
+			{Upstream: "udp://192.168.1.1:53", Status: "NODATA", DurationMs: 4},
+			{Upstream: "doh+https://9.9.9.9/dns-query", Status: "NODATA", DurationMs: 40},
+		},
+	})
+	h := New(Deps{Stats: st}).Handler()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/domain?name=nx.example.com", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var info stats.DomainInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if info.Answer != nil {
+		t.Fatalf("answer = %+v, want nil", info.Answer)
+	}
+	if len(info.Negative) != 1 {
+		t.Fatalf("negative = %+v", info.Negative)
+	}
+	neg := info.Negative[0]
+	if neg.Qtype != "AAAA" || neg.Rcode != "NOERROR" || len(neg.Attempts) != 2 {
+		t.Fatalf("negative = %+v", neg)
+	}
+	if neg.Attempts[1].Status != "NODATA" || neg.Attempts[1].DurationMs != 40 {
+		t.Fatalf("attempts = %+v", neg.Attempts)
+	}
+}
+
 func TestUpstreamsAPI(t *testing.T) {
 	st := stats.New(0)
 	st.Record("a.example.com.", "g1", false, nil)

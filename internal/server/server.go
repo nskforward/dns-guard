@@ -139,7 +139,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		if msg, origin, ok := c.Get(q, do); ok {
 			msg.Id = r.Id
 			msg.Question = r.Question
-			s.record(q.Name, groupName, true, answerInfo(msg, q.Qtype, origin, true, 0))
+			s.record(q.Name, groupName, true, answerInfo(msg, q.Qtype, origin, true, 0, nil))
 			writeReply(w, r, msg)
 			return
 		}
@@ -154,7 +154,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	if res.err != nil {
 		s.log.Warn("upstream failed", "name", q.Name, "group", groupName, "err", res.err)
-		s.record(q.Name, groupName, false, errorInfo(q.Qtype, res.err.Error(), res.elapsed))
+		s.record(q.Name, groupName, false, errorInfo(q.Qtype, res.err.Error(), res.elapsed, res.attempts))
 		answer(w, r, dns.RcodeServerFailure)
 		return
 	}
@@ -164,17 +164,18 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	out := res.resp.Copy()
 	out.Id = r.Id
 	out.Question = r.Question
-	s.record(q.Name, groupName, false, answerInfo(out, q.Qtype, res.origin, false, res.elapsed))
+	s.record(q.Name, groupName, false, answerInfo(out, q.Qtype, res.origin, false, res.elapsed, res.attempts))
 	writeReply(w, r, out)
 }
 
 // exchangeResult — результат одного обращения к апстриму, общий для всех
 // запросов, ожидающих тот же ответ (singleflight).
 type exchangeResult struct {
-	resp    *dns.Msg
-	origin  string
-	elapsed time.Duration
-	err     error
+	resp     *dns.Msg
+	origin   string
+	elapsed  time.Duration
+	attempts []upstream.Attempt
+	err      error
 }
 
 // exchange выполняет запрос к группе апстримов и сохраняет успешный ответ в
@@ -196,14 +197,14 @@ func (s *Server) exchange(st *state, q dns.Question, do bool, r *dns.Msg, group 
 		err = errors.New("empty response from upstream")
 	}
 	if err != nil {
-		return &exchangeResult{elapsed: elapsed, err: err}
+		return &exchangeResult{elapsed: elapsed, attempts: attempts, err: err}
 	}
 
 	applyTTL(resp, st.minTTL, st.maxTTL)
 	if c := s.cache; c != nil && st.cacheEnabled {
 		c.Put(q, do, resp, origin)
 	}
-	return &exchangeResult{resp: resp, origin: origin, elapsed: elapsed}
+	return &exchangeResult{resp: resp, origin: origin, elapsed: elapsed, attempts: attempts}
 }
 
 func (st *state) pick(qname string) (exchanger, string) {
@@ -233,13 +234,14 @@ func (s *Server) recordAttempts(group string, attempts []upstream.Attempt) {
 }
 
 // answerInfo описывает выданный ответ для страницы статистики.
-func answerInfo(m *dns.Msg, qtype uint16, upstream string, fromCache bool, elapsed time.Duration) *stats.AnswerInfo {
+func answerInfo(m *dns.Msg, qtype uint16, upstream string, fromCache bool, elapsed time.Duration, attempts []upstream.Attempt) *stats.AnswerInfo {
 	info := &stats.AnswerInfo{
 		Rcode:      rcodeName(m.Rcode),
 		Qtype:      typeName(qtype),
 		Upstream:   upstream,
 		FromCache:  fromCache,
 		DurationMs: float64(elapsed) / float64(time.Millisecond),
+		Attempts:   attemptInfos(attempts),
 	}
 	for _, rr := range m.Answer {
 		if _, ok := rr.(*dns.OPT); ok {
@@ -257,13 +259,46 @@ func answerInfo(m *dns.Msg, qtype uint16, upstream string, fromCache bool, elaps
 }
 
 // errorInfo описывает ответ, сформированный при ошибке апстрима.
-func errorInfo(qtype uint16, msg string, elapsed time.Duration) *stats.AnswerInfo {
+func errorInfo(qtype uint16, msg string, elapsed time.Duration, attempts []upstream.Attempt) *stats.AnswerInfo {
 	return &stats.AnswerInfo{
 		Rcode:      "SERVFAIL",
 		Qtype:      typeName(qtype),
 		Error:      msg,
 		DurationMs: float64(elapsed) / float64(time.Millisecond),
+		Attempts:   attemptInfos(attempts),
 	}
+}
+
+// attemptInfos конвертирует попытки обращения к апстримам в сведения для
+// статистики: адрес сервера, итог попытки и длительность.
+func attemptInfos(attempts []upstream.Attempt) []stats.AttemptInfo {
+	if len(attempts) == 0 {
+		return nil
+	}
+	out := make([]stats.AttemptInfo, 0, len(attempts))
+	for _, a := range attempts {
+		out = append(out, stats.AttemptInfo{
+			Upstream:   a.Upstream,
+			Status:     attemptStatus(a),
+			Error:      a.Err,
+			DurationMs: float64(a.Elapsed) / float64(time.Millisecond),
+		})
+	}
+	return out
+}
+
+// attemptStatus возвращает человекочитаемый итог одной попытки.
+func attemptStatus(a upstream.Attempt) string {
+	if a.Err != "" {
+		return "ERROR"
+	}
+	if a.Nodata {
+		return "NODATA"
+	}
+	if a.Rcode == dns.RcodeSuccess {
+		return "OK"
+	}
+	return rcodeName(a.Rcode)
 }
 
 func rcodeName(rcode int) string {

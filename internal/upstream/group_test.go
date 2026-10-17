@@ -110,6 +110,11 @@ func TestGroupNodataFromPrimaryFallsBack(t *testing.T) {
 	if len(attempts) != 2 || attempts[0].Err != "" || attempts[1].Err != "" {
 		t.Fatalf("attempts = %+v", attempts)
 	}
+	// Первая попытка — NODATA основного, вторая — успешный ответ резерва.
+	if !attempts[0].Nodata || attempts[0].Rcode != dns.RcodeSuccess ||
+		attempts[1].Nodata || attempts[1].Rcode != dns.RcodeSuccess {
+		t.Fatalf("attempts = %+v", attempts)
+	}
 }
 
 // TestGroupNodataEverywhereKeepsPrimary проверяет, что если и резерв ответил
@@ -138,6 +143,9 @@ func TestGroupNodataEverywhereKeepsPrimary(t *testing.T) {
 	}
 	if len(attempts) != 2 {
 		t.Fatalf("attempts = %+v, want primary+fallback", attempts)
+	}
+	if !attempts[0].Nodata || !attempts[1].Nodata {
+		t.Fatalf("attempts = %+v, want NODATA on both", attempts)
 	}
 }
 

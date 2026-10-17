@@ -52,11 +52,14 @@ func New(proto, addr string, bootstrap []string, hosts map[string]string, timeou
 }
 
 // Attempt — одна попытка обращения к апстриму группы.
-// Err пуст, если сервер ответил успешно; Elapsed — длительность попытки.
+// Err пуст, если сервер ответил; Elapsed — длительность попытки. Rcode и
+// Nodata описывают ответ сервера (для отображения цепочки в UI).
 type Attempt struct {
 	Upstream string
 	Err      string
 	Elapsed  time.Duration
+	Rcode    int  // код ответа сервера; 0, если попытка завершилась ошибкой
+	Nodata   bool // NOERROR без записей в секции Answer
 }
 
 // Group — группа апстримов: список основных и резервных серверов.
@@ -140,7 +143,12 @@ func (g *Group) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, string, []A
 			attempts = append(attempts, Attempt{Upstream: r.String(), Err: err.Error(), Elapsed: elapsed})
 			continue
 		}
-		attempts = append(attempts, Attempt{Upstream: r.String(), Elapsed: elapsed})
+		attempts = append(attempts, Attempt{
+			Upstream: r.String(),
+			Elapsed:  elapsed,
+			Rcode:    resp.Rcode,
+			Nodata:   isNoData(resp),
+		})
 		if nodata == nil && isNoData(resp) && !isFallback && len(g.fallback) > 0 && shouldVerifyNoData(m) {
 			// NODATA от основного сервера может быть его ошибкой — проверяем
 			// резервными (и остальными основными до них). Проверяем только

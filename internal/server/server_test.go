@@ -20,19 +20,32 @@ import (
 
 // fakeExchanger — подменная вышестоящая группа.
 type fakeExchanger struct {
-	resp  *dns.Msg
-	err   error
-	last  *dns.Msg
-	calls int
+	resp     *dns.Msg
+	err      error
+	attempts []upstream.Attempt // если задано — возвращается как цепочка попыток
+	last     *dns.Msg
+	calls    int
 }
 
 func (f *fakeExchanger) Exchange(_ context.Context, m *dns.Msg) (*dns.Msg, string, []upstream.Attempt, error) {
 	f.calls++
 	f.last = m
-	if f.err != nil {
-		return nil, "", []upstream.Attempt{{Upstream: "fake", Err: f.err.Error(), Elapsed: time.Millisecond}}, f.err
+	origin := "fake"
+	if len(f.attempts) > 0 {
+		origin = f.attempts[len(f.attempts)-1].Upstream
 	}
-	return f.resp.Copy(), "fake", []upstream.Attempt{{Upstream: "fake", Elapsed: time.Millisecond}}, nil
+	if f.err != nil {
+		at := f.attempts
+		if at == nil {
+			at = []upstream.Attempt{{Upstream: "fake", Err: f.err.Error(), Elapsed: time.Millisecond}}
+		}
+		return nil, "", at, f.err
+	}
+	at := f.attempts
+	if at == nil {
+		at = []upstream.Attempt{{Upstream: "fake", Elapsed: time.Millisecond}}
+	}
+	return f.resp.Copy(), origin, at, nil
 }
 
 func (f *fakeExchanger) Close() error { return nil }
@@ -254,6 +267,84 @@ func TestServeDNSServfailOnUpstreamError(t *testing.T) {
 	if len(groups) != 1 || groups[0].Failed != 1 || len(groups[0].Upstreams) != 1 ||
 		groups[0].Upstreams[0].Failed != 1 || groups[0].Upstreams[0].Ok != 0 {
 		t.Fatalf("upstream failure not recorded: %+v", groups)
+	}
+	// Цепочка попыток сохраняется и для SERVFAIL.
+	page := ss.ServfailPage(1, 0)
+	if len(page.Domains) != 1 || page.Domains[0].Last == nil || len(page.Domains[0].Last.Attempts) != 1 {
+		t.Fatalf("servfail attempts not recorded: %+v", page.Domains)
+	}
+	if a := page.Domains[0].Last.Attempts[0]; a.Upstream != "fake" || a.Status != "ERROR" || a.Error != "boom" {
+		t.Fatalf("attempt = %+v", a)
+	}
+}
+
+// TestServeDNSRecordsNoDataAttempts проверяет, что NODATA-ответ попадает в
+// сводку как негативный (Status NODATA) вместе с цепочкой пройденных апстримов.
+func TestServeDNSRecordsNoDataAttempts(t *testing.T) {
+	resp := new(dns.Msg)
+	resp.SetQuestion("example.com.", dns.TypeA)
+	resp.Response = true // NOERROR без записей — NODATA
+	fa := &fakeExchanger{resp: resp, attempts: []upstream.Attempt{
+		{Upstream: "udp://192.168.1.1:53", Rcode: dns.RcodeSuccess, Nodata: true, Elapsed: 4 * time.Millisecond},
+		{Upstream: "doh+https://9.9.9.9/dns-query", Rcode: dns.RcodeSuccess, Nodata: true, Elapsed: 40 * time.Millisecond},
+	}}
+	ss := stats.New(0)
+	s := newTestServer(testState(fa, fa, 60), cache.New(100, 60, 0, 0), ss)
+
+	s.ServeDNS(&mockWriter{}, query("example.com", dns.TypeA))
+
+	di, ok := ss.DomainInfo("example.com")
+	if !ok {
+		t.Fatal("domain not found")
+	}
+	if di.Answer != nil {
+		t.Fatalf("NODATA must not produce successful answer: %+v", di.Answer)
+	}
+	if len(di.Negative) != 1 {
+		t.Fatalf("negative = %+v", di.Negative)
+	}
+	neg := di.Negative[0]
+	if neg.Rcode != "NOERROR" || neg.Qtype != "A" {
+		t.Fatalf("negative = %+v", neg)
+	}
+	if neg.Upstream != "doh+https://9.9.9.9/dns-query" {
+		t.Fatalf("negative upstream = %q", neg.Upstream)
+	}
+	if len(neg.Attempts) != 2 {
+		t.Fatalf("attempts = %+v", neg.Attempts)
+	}
+	if neg.Attempts[0].Status != "NODATA" || neg.Attempts[0].Upstream != "udp://192.168.1.1:53" {
+		t.Fatalf("attempt[0] = %+v", neg.Attempts[0])
+	}
+	if neg.Attempts[1].Status != "NODATA" || neg.Attempts[1].DurationMs != 40 {
+		t.Fatalf("attempt[1] = %+v", neg.Attempts[1])
+	}
+}
+
+// TestServeDNSPositiveAfterNoDataKeepsChain проверяет, что у успешного ответа,
+// полученного после NODATA основного сервера, сохраняется вся цепочка попыток.
+func TestServeDNSPositiveAfterNoDataKeepsChain(t *testing.T) {
+	fa := &fakeExchanger{
+		resp: aResponse("example.com", 300),
+		attempts: []upstream.Attempt{
+			{Upstream: "udp://192.168.1.1:53", Rcode: dns.RcodeSuccess, Nodata: true, Elapsed: 4 * time.Millisecond},
+			{Upstream: "doh+https://9.9.9.9/dns-query", Rcode: dns.RcodeSuccess, Elapsed: 40 * time.Millisecond},
+		},
+	}
+	ss := stats.New(0)
+	s := newTestServer(testState(fa, fa, 60), cache.New(100, 60, 0, 0), ss)
+
+	s.ServeDNS(&mockWriter{}, query("example.com", dns.TypeA))
+
+	di, ok := ss.DomainInfo("example.com")
+	if !ok || di.Answer == nil {
+		t.Fatalf("answer not recorded: %+v", di)
+	}
+	if len(di.Negative) != 0 {
+		t.Fatalf("negative must be empty: %+v", di.Negative)
+	}
+	if len(di.Answer.Attempts) != 2 || di.Answer.Attempts[0].Status != "NODATA" || di.Answer.Attempts[1].Status != "OK" {
+		t.Fatalf("attempts = %+v", di.Answer.Attempts)
 	}
 }
 

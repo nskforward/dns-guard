@@ -42,15 +42,26 @@ type DomainStat struct {
 
 // AnswerInfo — сведения о последнем ответе, выданном по домену.
 type AnswerInfo struct {
-	Rcode      string    `json:"rcode"`
-	Qtype      string    `json:"qtype,omitempty"`
-	Records    []string  `json:"records,omitempty"`   // секция Answer
-	Authority  []string  `json:"authority,omitempty"` // секция Ns (обычно SOA)
-	Error      string    `json:"error,omitempty"`
-	Upstream   string    `json:"upstream,omitempty"`
-	FromCache  bool      `json:"from_cache"`
-	DurationMs float64   `json:"duration_ms,omitempty"` // время запроса через апстрим, мс
-	At         time.Time `json:"at"`
+	Rcode      string        `json:"rcode"`
+	Qtype      string        `json:"qtype,omitempty"`
+	Records    []string      `json:"records,omitempty"`   // секция Answer
+	Authority  []string      `json:"authority,omitempty"` // секция Ns (обычно SOA)
+	Error      string        `json:"error,omitempty"`
+	Upstream   string        `json:"upstream,omitempty"`
+	FromCache  bool          `json:"from_cache"`
+	DurationMs float64       `json:"duration_ms,omitempty"` // время запроса через апстрим, мс
+	Attempts   []AttemptInfo `json:"attempts,omitempty"`    // цепочка попыток (только промах кэша)
+	At         time.Time     `json:"at"`
+}
+
+// AttemptInfo — одна попытка обращения к апстриму группы: кто ответил, с каким
+// результатом и за сколько. Цепочка показывает, к каким серверам ходили —
+// например, NODATA от основного и последующая проверка резервными.
+type AttemptInfo struct {
+	Upstream   string  `json:"upstream"`
+	Status     string  `json:"status,omitempty"` // OK / NODATA / NXDOMAIN / SERVFAIL / ERROR
+	Error      string  `json:"error,omitempty"`  // текст ошибки транспортного уровня
+	DurationMs float64 `json:"duration_ms,omitempty"`
 }
 
 // successful сообщает, что ответ отражает реально полученные записи: NOERROR
@@ -65,7 +76,8 @@ func (a *AnswerInfo) successful() bool {
 // запроса.
 type DomainInfo struct {
 	DomainStat
-	Answer *AnswerInfo `json:"answer,omitempty"`
+	Answer   *AnswerInfo  `json:"answer,omitempty"`   // склейка успешных ответов по qtype
+	Negative []AnswerInfo `json:"negative,omitempty"` // последние NODATA/NXDOMAIN по qtype, свежие сверху
 }
 
 // UpstreamStat — счётчики попыток одного апстрима в группе.
@@ -148,7 +160,8 @@ type domain struct {
 	total    uint64                 // всего запросов
 	hits     uint64                 // ответов из кэша
 	servfail uint64                 // SERVFAIL-ответов
-	answers  map[string]*AnswerInfo // последний ответ по каждому qtype
+	answers  map[string]*AnswerInfo // последний успешный ответ по каждому qtype
+	negative map[string]*AnswerInfo // последний негативный (NODATA/NXDOMAIN) по qtype
 	lastFail *AnswerInfo            // последний SERVFAIL-ответ
 }
 
@@ -309,6 +322,10 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 		cp := cloneAnswer(info, at)
 		if cp.successful() {
 			d.storeAnswer(&cp)
+		} else if !failed {
+			// NODATA (NOERROR без записей) и NXDOMAIN: успешные записи не
+			// трогаем, но запоминаем последний негативный ответ по типу.
+			d.storeNegative(&cp)
 		}
 		if failed {
 			d.servfail++
@@ -320,25 +337,49 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 // storeAnswer сохраняет последний успешный ответ по его qtype; негативные
 // ответы (NXDOMAIN, NODATA) и SERVFAIL сюда не попадают и не затирают ранее
 // накопленные записи. Число типов на домен ограничено maxAnswersPerDomain:
-// при переполнении вытесняется самый старый.
+// при переполнении вытесняется самый старый. Свежий успешный ответ делает
+// прежний негативный ответ по тому же типу неактуальным.
 func (d *domain) storeAnswer(info *AnswerInfo) {
 	if d.answers == nil {
 		d.answers = make(map[string]*AnswerInfo)
 	}
-	if _, ok := d.answers[info.Qtype]; !ok && len(d.answers) >= maxAnswersPerDomain {
-		var (
-			oldestKey string
-			oldest    time.Time
-			first     = true
-		)
-		for k, v := range d.answers {
-			if first || v.At.Before(oldest) {
-				oldestKey, oldest, first = k, v.At, false
-			}
-		}
-		delete(d.answers, oldestKey)
+	if _, ok := d.answers[info.Qtype]; !ok {
+		evictOldest(d.answers)
 	}
 	d.answers[info.Qtype] = info
+	delete(d.negative, info.Qtype)
+}
+
+// storeNegative сохраняет последний негативный ответ (NODATA/NXDOMAIN) по его
+// qtype. Успешную сводку не трогает: негативный ответ не затирает ранее
+// полученные записи. Лимит типов тот же, что и для успешных ответов.
+func (d *domain) storeNegative(info *AnswerInfo) {
+	if d.negative == nil {
+		d.negative = make(map[string]*AnswerInfo)
+	}
+	if _, ok := d.negative[info.Qtype]; !ok {
+		evictOldest(d.negative)
+	}
+	d.negative[info.Qtype] = info
+}
+
+// evictOldest вытесняет самый старый по времени ответ, если лимит типов на
+// домен исчерпан.
+func evictOldest(m map[string]*AnswerInfo) {
+	if len(m) < maxAnswersPerDomain {
+		return
+	}
+	var (
+		oldestKey string
+		oldest    time.Time
+		first     = true
+	)
+	for k, v := range m {
+		if first || v.At.Before(oldest) {
+			oldestKey, oldest, first = k, v.At, false
+		}
+	}
+	delete(m, oldestKey)
 }
 
 // RecordUpstream учитывает одну попытку обращения к апстриму группы.
@@ -490,9 +531,29 @@ func (s *Stats) DomainInfo(name string) (DomainInfo, bool) {
 		a := mergedAnswer(d.answers)
 		info.Answer = &a
 	}
+	if len(d.negative) > 0 {
+		info.Negative = mergedNegative(d.negative)
+	}
 	s.mu.Unlock()
 
 	return info, true
+}
+
+// mergedNegative возвращает последние негативные ответы по каждому qtype,
+// свежие сверху. Записи не склеиваются: у NODATA/NXDOMAIN их нет, а тип
+// запроса важен для понимания, что именно проверялось.
+func mergedNegative(negative map[string]*AnswerInfo) []AnswerInfo {
+	out := make([]AnswerInfo, 0, len(negative))
+	for _, a := range negative {
+		out = append(out, cloneAnswer(a, a.At))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].At.Equal(out[j].At) {
+			return out[i].At.After(out[j].At)
+		}
+		return out[i].Qtype < out[j].Qtype
+	})
+	return out
 }
 
 // mergedAnswer склеивает последние успешные ответы по всем qtype в один:
@@ -607,6 +668,7 @@ func cloneAnswer(info *AnswerInfo, at time.Time) AnswerInfo {
 	cp := *info
 	cp.Records = append([]string(nil), info.Records...)
 	cp.Authority = append([]string(nil), info.Authority...)
+	cp.Attempts = append([]AttemptInfo(nil), info.Attempts...)
 	if cp.At.IsZero() {
 		cp.At = at
 	}

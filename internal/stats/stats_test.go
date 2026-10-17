@@ -501,6 +501,79 @@ func TestDomainInfoLastAnswers(t *testing.T) {
 	}
 }
 
+// TestDomainInfoNegative проверяет учёт негативных ответов: NODATA/NXDOMAIN
+// хранятся по qtype с цепочкой попыток, не затирают успешные записи, а свежий
+// успешный ответ снимает негативный того же типа.
+func TestDomainInfoNegative(t *testing.T) {
+	now := time.Unix(200, 0)
+	s := newWithClock(0, func() time.Time { return now })
+	s.Record("api.example.com.", "g", false, &AnswerInfo{
+		Rcode:   "NOERROR",
+		Qtype:   "A",
+		Records: []string{"api.example.com. 60 IN A 1.2.3.4"},
+	})
+	// NODATA по AAAA: основной ответил NODATA, резерв проверял — тоже NODATA.
+	now = time.Unix(210, 0)
+	s.Record("api.example.com.", "g", false, &AnswerInfo{
+		Rcode:     "NOERROR",
+		Qtype:     "AAAA",
+		Authority: []string{"example.com. 60 IN SOA ns. hostmaster. 1 2 3 4 60"},
+		Attempts: []AttemptInfo{
+			{Upstream: "udp://192.168.1.1:53", Status: "NODATA", DurationMs: 4},
+			{Upstream: "doh+https://9.9.9.9/dns-query", Status: "NODATA", DurationMs: 40},
+		},
+	})
+	// NXDOMAIN по HTTPS (из кэша).
+	now = time.Unix(220, 0)
+	s.Record("api.example.com.", "g", true, &AnswerInfo{
+		Rcode:     "NXDOMAIN",
+		Qtype:     "HTTPS",
+		FromCache: true,
+	})
+
+	di, ok := s.DomainInfo("api.example.com")
+	if !ok {
+		t.Fatal("domain not found")
+	}
+	// Негативные ответы не затирают успешную сводку.
+	if di.Answer == nil || di.Answer.Rcode != "NOERROR" || len(di.Answer.Records) != 1 {
+		t.Fatalf("answer = %+v", di.Answer)
+	}
+	if len(di.Negative) != 2 {
+		t.Fatalf("negative = %+v", di.Negative)
+	}
+	// Свежие сверху.
+	if di.Negative[0].Qtype != "HTTPS" || di.Negative[0].Rcode != "NXDOMAIN" || !di.Negative[0].FromCache {
+		t.Fatalf("negative[0] = %+v", di.Negative[0])
+	}
+	aaaa := di.Negative[1]
+	if aaaa.Qtype != "AAAA" || aaaa.Rcode != "NOERROR" || len(aaaa.Authority) != 1 {
+		t.Fatalf("negative[1] = %+v", aaaa)
+	}
+	if len(aaaa.Attempts) != 2 || aaaa.Attempts[0].Status != "NODATA" ||
+		aaaa.Attempts[1].Upstream != "doh+https://9.9.9.9/dns-query" {
+		t.Fatalf("attempts = %+v", aaaa.Attempts)
+	}
+
+	// Глубокая копия: правка выданной сводки не меняет хранилище.
+	di.Negative[1].Attempts[0].Upstream = "mutated"
+	if again, _ := s.DomainInfo("api.example.com"); again.Negative[1].Attempts[0].Upstream == "mutated" {
+		t.Fatal("attempts must be cloned")
+	}
+
+	// Свежий успешный AAAA-ответ снимает негативный по тому же типу.
+	now = time.Unix(230, 0)
+	s.Record("api.example.com.", "g", false, &AnswerInfo{
+		Rcode:   "NOERROR",
+		Qtype:   "AAAA",
+		Records: []string{"api.example.com. 30 IN AAAA 2001:db8::1"},
+	})
+	di, _ = s.DomainInfo("api.example.com")
+	if len(di.Negative) != 1 || di.Negative[0].Qtype != "HTTPS" {
+		t.Fatalf("negative after success = %+v", di.Negative)
+	}
+}
+
 // TestAnswersPerDomainLimit проверяет, что число последних успешных ответов
 // на домен ограничено: при переполнении вытесняется самый старый тип.
 func TestAnswersPerDomainLimit(t *testing.T) {
