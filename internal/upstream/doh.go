@@ -3,10 +3,12 @@ package upstream
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/miekg/dns"
@@ -16,14 +18,25 @@ const dohContentType = "application/dns-message"
 
 // dohResolver — клиент к вышестоящему DNS по DNS-over-HTTPS (RFC 8484).
 type dohResolver struct {
-	url    string
+	url    string // полный URL для запросов (путь может содержать секрет)
+	name   string // отображаемое имя без пути: scheme://host[:port]
 	client *http.Client
 }
 
-func newDoH(url string, bootstrap []string, hosts map[string]string, timeout time.Duration) (*dohResolver, error) {
-	if url == "" {
+func newDoH(rawURL string, bootstrap []string, hosts map[string]string, timeout time.Duration) (*dohResolver, error) {
+	if rawURL == "" {
 		return nil, fmt.Errorf("empty DoH url")
 	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid DoH url: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return nil, fmt.Errorf("invalid DoH url %q: scheme and host are required", rawURL)
+	}
+	// В статистике и логах показываем только origin (scheme://host[:port]),
+	// чтобы не раскрывать секретный путь/параметры DoH-эндпоинта.
+	name := u.Scheme + "://" + u.Host
 	base := bootstrapDialer(bootstrap, timeout)
 	// Если хост URL есть в статическом маппинге, подменяем адрес соединения на
 	// IP, сохраняя хостнейм в URL для TLS-SNI и проверки сертификата.
@@ -43,7 +56,8 @@ func newDoH(url string, bootstrap []string, hosts map[string]string, timeout tim
 		IdleConnTimeout:     90 * time.Second,
 	}
 	return &dohResolver{
-		url:    url,
+		url:    rawURL,
+		name:   name,
 		client: &http.Client{Transport: tr, Timeout: timeout},
 	}, nil
 }
@@ -62,24 +76,30 @@ func (d *dohResolver) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, error
 
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return nil, err
+		// *url.Error содержит полный URL с секретным путём — убираем его,
+		// оставляя только origin, чтобы токен не попадал в статистику и логи.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return nil, fmt.Errorf("doh %s: %w", d.name, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("doh: unexpected status %d", resp.StatusCode)
+		return nil, fmt.Errorf("doh %s: unexpected status %d", d.name, resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, dns.MaxMsgSize))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("doh %s: %w", d.name, err)
 	}
 	out := new(dns.Msg)
 	if err := out.Unpack(body); err != nil {
-		return nil, fmt.Errorf("doh: unpack: %w", err)
+		return nil, fmt.Errorf("doh %s: unpack: %w", d.name, err)
 	}
 	return out, nil
 }
 
-func (d *dohResolver) String() string { return d.url }
+func (d *dohResolver) String() string { return d.name }
 
 // Close закрывает idle-соединения HTTP-клиента DoH.
 func (d *dohResolver) Close() error {

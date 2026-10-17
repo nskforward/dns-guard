@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,5 +76,48 @@ func TestDoHStaticHost(t *testing.T) {
 	}
 	if len(resp.Answer) != 1 {
 		t.Fatalf("answer = %v, want 1 record", resp.Answer)
+	}
+}
+
+// TestDoHStringHidesSecret проверяет, что идентификатор DoH-апстрима в
+// статистике не содержит секретный путь и query-параметры.
+func TestDoHStringHidesSecret(t *testing.T) {
+	const secret = "l1yPpn5aumqpqGrVt8Z5SWcs7SlX-VRfuw4HJWQ8fLo"
+	r, err := newDoH("https://stream2.sla9.ru:8443/"+secret+"/dns-query?key="+secret, nil, nil, time.Second)
+	if err != nil {
+		t.Fatalf("newDoH: %v", err)
+	}
+	if got, want := r.String(), "https://stream2.sla9.ru:8443"; got != want {
+		t.Fatalf("String() = %q, want %q", got, want)
+	}
+}
+
+// TestDoHErrorHidesSecret проверяет, что текст ошибки DoH не содержит
+// секретный путь: иначе он попадает в статистику и логи.
+func TestDoHErrorHidesSecret(t *testing.T) {
+	const secret = "secret-token"
+	// Порт 1 недоступен — ошибка соединения возникает сразу.
+	r, err := newDoH("http://127.0.0.1:1/"+secret+"/dns-query", nil, nil, 500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("newDoH: %v", err)
+	}
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	_, err = r.Exchange(context.Background(), q)
+	if err == nil {
+		t.Fatalf("ожидалась ошибка соединения")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("ошибка содержит секретный путь: %v", err)
+	}
+	if !strings.Contains(err.Error(), "http://127.0.0.1:1") {
+		t.Fatalf("ошибка не содержит origin апстрима: %v", err)
+	}
+}
+
+// TestDoHInvalidURL проверяет отказ при некорректном URL.
+func TestDoHInvalidURL(t *testing.T) {
+	if _, err := newDoH("dns.google/dns-query", nil, nil, time.Second); err == nil {
+		t.Fatalf("ожидалась ошибка для URL без scheme и host")
 	}
 }
