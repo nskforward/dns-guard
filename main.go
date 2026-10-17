@@ -40,7 +40,7 @@ func main() {
 	if cfg.Cache.Enabled {
 		c = cache.New(cfg.Cache.MaxEntries, cfg.Cache.MinTTL, cfg.Cache.MaxTTL)
 	}
-	st := stats.New()
+	st := stats.New(cfg.Stats.MaxDomains)
 
 	srv, err := server.New(cfg, c, st, log)
 	if err != nil {
@@ -48,7 +48,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	app := &application{path: *cfgPath, cfg: cfg, srv: srv, log: log}
+	app := &application{path: *cfgPath, cfg: cfg, srv: srv, stats: st, log: log}
 
 	udp := &dns.Server{Addr: cfg.Listen.UDP, Net: "udp", Handler: srv}
 	tcp := &dns.Server{Addr: cfg.Listen.TCP, Net: "tcp", Handler: srv}
@@ -123,11 +123,12 @@ func main() {
 
 // application хранит активную конфигурацию и применяет её изменения.
 type application struct {
-	mu   sync.RWMutex
-	path string
-	cfg  *config.Config
-	srv  *server.Server
-	log  *slog.Logger
+	mu    sync.RWMutex
+	path  string
+	cfg   *config.Config
+	srv   *server.Server
+	stats *stats.Stats
+	log   *slog.Logger
 }
 
 func (a *application) getConfig() *config.Config {
@@ -140,6 +141,9 @@ func (a *application) getConfig() *config.Config {
 func (a *application) reload(cfg *config.Config) error {
 	if err := a.srv.Reload(cfg); err != nil {
 		return err
+	}
+	if a.stats != nil {
+		a.stats.SetMaxDomains(cfg.Stats.MaxDomains)
 	}
 	a.mu.Lock()
 	a.cfg = cfg

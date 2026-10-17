@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/nskforward/dns-guard/internal/cache"
 	"github.com/nskforward/dns-guard/internal/config"
@@ -16,8 +18,6 @@ import (
 
 //go:embed index.html
 var assets embed.FS
-
-const topN = 100
 
 // Deps — зависимости веб-сервера.
 type Deps struct {
@@ -44,6 +44,8 @@ func New(d Deps) *Server {
 	s.mux.HandleFunc("/", s.handleIndex)
 	s.mux.HandleFunc("/api/health", s.handleHealth)
 	s.mux.HandleFunc("/api/stats", s.handleStats)
+	s.mux.HandleFunc("/api/domains", s.handleDomains)
+	s.mux.HandleFunc("/api/domain", s.handleDomain)
 	s.mux.HandleFunc("/api/config", s.handleConfig)
 	s.mux.HandleFunc("/api/cache/flush", s.handleFlush)
 	return s
@@ -78,12 +80,67 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	resp := statsResponse{}
 	if s.deps.Stats != nil {
-		resp.Snapshot = s.deps.Stats.Snapshot(topN)
+		resp.Snapshot = s.deps.Stats.Snapshot()
 	}
 	if s.deps.Cache != nil {
 		resp.CacheLen = s.deps.Cache.Len()
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleDomains отдаёт страницу списка доменов:
+// GET /api/domains?page=1&limit=50&search=строка
+func (s *Server) handleDomains(w http.ResponseWriter, r *http.Request) {
+	page := queryInt(r, "page", 1)
+	size := queryInt(r, "limit", stats.DefaultPageSize)
+	search := r.URL.Query().Get("search")
+	if s.deps.Stats == nil {
+		if size <= 0 {
+			size = stats.DefaultPageSize
+		}
+		if size > stats.MaxPageSize {
+			size = stats.MaxPageSize
+		}
+		if page < 1 {
+			page = 1
+		}
+		writeJSON(w, http.StatusOK, stats.DomainsPage{Page: page, Size: size, Items: []stats.DomainStat{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.deps.Stats.DomainsPage(page, size, search))
+}
+
+// handleDomain отдаёт статистику домена и сведения о последнем ответе:
+// GET /api/domain?name=example.com
+func (s *Server) handleDomain(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	if s.deps.Stats == nil {
+		http.Error(w, "stats unavailable", http.StatusNotFound)
+		return
+	}
+	info, ok := s.deps.Stats.DomainInfo(name)
+	if !ok {
+		http.Error(w, "domain not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+// queryInt разбирает целочисленный query-параметр, возвращая def при ошибке.
+func queryInt(r *http.Request, key string, def int) int {
+	raw := r.URL.Query().Get(key)
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {

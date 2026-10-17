@@ -92,7 +92,7 @@ func newTestServer(st *state, c *cache.Cache, ss *stats.Stats) *Server {
 func TestServeDNSMissThenHit(t *testing.T) {
 	fa := &fakeExchanger{resp: aResponse("example.com", 300)}
 	c := cache.New(100, 60, 0)
-	ss := stats.New()
+	ss := stats.New(0)
 	s := newTestServer(testState(fa, fa, 60), c, ss)
 
 	// Первый запрос — промах, идёт к апстриму.
@@ -117,15 +117,24 @@ func TestServeDNSMissThenHit(t *testing.T) {
 	if fa.calls != 1 {
 		t.Fatalf("cache miss on second query, calls = %d", fa.calls)
 	}
-	snap := ss.Snapshot(10)
+	snap := ss.Snapshot()
 	if snap.CacheHits != 1 || snap.CacheMisses != 1 {
 		t.Fatalf("hits/misses = %d/%d", snap.CacheHits, snap.CacheMisses)
+	}
+
+	// Последний ответ по домену сохранён (второй запрос обслужен из кэша).
+	info, ok := ss.DomainInfo("example.com")
+	if !ok || info.Last == nil {
+		t.Fatalf("last answer not recorded: %+v", info)
+	}
+	if info.Last.Rcode != "NOERROR" || !info.Last.FromCache || len(info.Last.Records) != 1 {
+		t.Fatalf("last = %+v", info.Last)
 	}
 }
 
 func TestServeDNSAppliesMinTTL(t *testing.T) {
 	fa := &fakeExchanger{resp: aResponse("example.com", 5)}
-	s := newTestServer(testState(fa, fa, 60), cache.New(100, 60, 0), stats.New())
+	s := newTestServer(testState(fa, fa, 60), cache.New(100, 60, 0), stats.New(0))
 
 	w := &mockWriter{}
 	s.ServeDNS(w, query("example.com", dns.TypeA))
@@ -137,7 +146,7 @@ func TestServeDNSAppliesMinTTL(t *testing.T) {
 func TestServeDNSRouting(t *testing.T) {
 	fa := &fakeExchanger{resp: aResponse("example.com", 300)}
 	fb := &fakeExchanger{resp: aResponse("example.ru", 300)}
-	s := newTestServer(testState(fa, fb, 60), cache.New(100, 60, 0), stats.New())
+	s := newTestServer(testState(fa, fb, 60), cache.New(100, 60, 0), stats.New(0))
 
 	// Зона .ru -> группа b.
 	s.ServeDNS(&mockWriter{}, query("example.ru", dns.TypeA))
@@ -153,7 +162,7 @@ func TestServeDNSRouting(t *testing.T) {
 
 func TestServeDNSServfailOnUpstreamError(t *testing.T) {
 	fa := &fakeExchanger{err: errors.New("boom")}
-	ss := stats.New()
+	ss := stats.New(0)
 	s := newTestServer(testState(fa, fa, 60), cache.New(100, 60, 0), ss)
 
 	w := &mockWriter{}
@@ -161,7 +170,7 @@ func TestServeDNSServfailOnUpstreamError(t *testing.T) {
 	if w.msg.Rcode != dns.RcodeServerFailure {
 		t.Fatalf("rcode = %d, want SERVFAIL", w.msg.Rcode)
 	}
-	if ss.Snapshot(1).Servfail != 1 {
+	if ss.Snapshot().Servfail != 1 {
 		t.Fatalf("servfail counter not incremented")
 	}
 }
@@ -170,7 +179,7 @@ func TestServeDNSRestoresIDAndQuestion(t *testing.T) {
 	fa := &fakeExchanger{resp: aResponse("example.com", 300)}
 	fa.resp.Question = nil // апстрим не вернул вопрос
 	fa.resp.Id = 999
-	s := newTestServer(testState(fa, fa, 60), nil, stats.New())
+	s := newTestServer(testState(fa, fa, 60), nil, stats.New(0))
 
 	q := query("example.com", dns.TypeA)
 	q.Id = 4242
@@ -186,7 +195,7 @@ func TestServeDNSRestoresIDAndQuestion(t *testing.T) {
 
 func TestServeDNSRefusedOnBadQuery(t *testing.T) {
 	fa := &fakeExchanger{resp: aResponse("example.com", 300)}
-	s := newTestServer(testState(fa, fa, 60), nil, stats.New())
+	s := newTestServer(testState(fa, fa, 60), nil, stats.New(0))
 
 	m := new(dns.Msg)
 	m.Id = 1
@@ -210,7 +219,7 @@ func TestTruncationUDPvsTCP(t *testing.T) {
 		resp.Answer = append(resp.Answer, rr)
 	}
 	fa := &fakeExchanger{resp: resp}
-	s := newTestServer(testState(fa, fa, 0), cache.New(100, 0, 0), stats.New())
+	s := newTestServer(testState(fa, fa, 0), cache.New(100, 0, 0), stats.New(0))
 
 	// UDP без EDNS: обрезаем до 512 с TC=1.
 	wu := &mockWriter{}
@@ -233,7 +242,7 @@ func TestTruncationUDPvsTCP(t *testing.T) {
 
 func TestReloadSwapsState(t *testing.T) {
 	fa := &fakeExchanger{resp: aResponse("example.com", 300)}
-	s := newTestServer(testState(fa, fa, 60), nil, stats.New())
+	s := newTestServer(testState(fa, fa, 60), nil, stats.New(0))
 
 	old := s.st.Load()
 	cfg := config.Default()

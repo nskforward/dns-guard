@@ -24,15 +24,31 @@
   th { color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
   td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; }
   tr:last-child td { border-bottom:none; }
-  .row { display:flex; align-items:center; justify-content:space-between; margin-top:20px; }
+  tr.clickable { cursor:pointer; }
+  tr.clickable:hover td { background:rgba(79,156,249,.08); }
+  td.domain { word-break:break-all; }
+  .row { display:flex; align-items:center; justify-content:space-between; margin-top:20px; gap:12px; flex-wrap:wrap; }
   .muted { color:var(--muted); }
   button.act { background:var(--accent); color:#fff; border:none; padding:8px 16px; border-radius:8px; cursor:pointer; font-size:14px; }
   button.act.secondary { background:var(--panel); border:1px solid var(--line); color:var(--fg); }
+  input[type=search] { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px 12px; font-size:14px; min-width:280px; }
+  input[type=search]:focus { outline:none; border-color:var(--accent); }
+  .pager { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:12px; }
+  .pager button { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:6px 10px; cursor:pointer; font-size:13px; min-width:34px; }
+  .pager button.active { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .pager button:disabled { opacity:.45; cursor:default; }
   textarea { width:100%; height:60vh; background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:10px; padding:14px; font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; resize:vertical; }
   .msg { padding:8px 12px; border-radius:8px; margin-top:12px; display:none; }
   .msg.ok { display:block; background:rgba(63,185,80,.15); color:var(--ok); }
   .msg.err { display:block; background:rgba(248,81,73,.15); color:var(--err); white-space:pre-wrap; }
   .hide { display:none; }
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; padding:20px; z-index:10; }
+  .modal.hide { display:none; }
+  .modal-box { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; width:100%; max-width:820px; max-height:85vh; overflow:auto; }
+  pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin:8px 0 0; overflow:auto; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; word-break:break-all; }
+  .rcode-ok { color:var(--ok); }
+  .rcode-warn { color:var(--warn); }
+  .rcode-err { color:var(--err); }
 </style>
 </head>
 <body>
@@ -57,13 +73,22 @@
       <div class="card"><div class="k">Uptime</div><div class="v" id="c-uptime">—</div></div>
     </div>
     <div class="row">
-      <h3 style="margin:0">Top-100 доменов</h3>
+      <h3 style="margin:0">Домены</h3>
       <button class="act secondary" onclick="flushCache()">Сбросить кэш</button>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <span>
+        <input type="search" id="search" placeholder="Поиск по домену (подстрока)" onkeydown="if (event.key === 'Enter') applySearch()">
+        <button class="act" onclick="applySearch()">Найти</button>
+        <button class="act secondary" onclick="resetSearch()">Сбросить</button>
+      </span>
+      <span id="domains-total" class="muted"></span>
     </div>
     <table>
       <thead><tr><th>#</th><th>Домен</th><th class="num">Запросов</th><th class="num">RPM сейчас</th><th class="num">Peak RPM</th></tr></thead>
       <tbody id="top"></tbody>
     </table>
+    <div id="pager" class="pager"></div>
   </section>
 
   <section id="view-cfg" class="hide">
@@ -78,8 +103,33 @@
     <div id="cfg-msg" class="msg"></div>
   </section>
 </main>
+
+<div id="modal" class="modal hide" onclick="closeModal(event)">
+  <div class="modal-box" onclick="event.stopPropagation()">
+    <div class="row" style="margin-top:0">
+      <h3 id="m-title" style="margin:0; word-break:break-all"></h3>
+      <button class="act secondary" onclick="closeModal()">Закрыть</button>
+    </div>
+    <div id="m-meta" class="muted" style="margin-top:8px"></div>
+    <div id="m-last" style="margin-top:12px"></div>
+    <div id="m-error" class="msg"></div>
+    <div id="m-records-wrap" class="hide">
+      <div class="muted" style="margin-top:12px">Ответ (Answer)</div>
+      <pre id="m-records"></pre>
+    </div>
+    <div id="m-auth-wrap" class="hide">
+      <div class="muted" style="margin-top:12px">Authority (Ns)</div>
+      <pre id="m-auth"></pre>
+    </div>
+  </div>
+</div>
+
 <script>
 let timer = null;
+let page = 1;
+let search = '';
+let pages = 0;
+const PAGE_SIZE = 50;
 
 function showTab(which) {
   const dash = which === 'dash';
@@ -104,6 +154,11 @@ function uptime(sec) {
 }
 
 async function refresh() {
+  await loadStats();
+  await loadDomains();
+}
+
+async function loadStats() {
   try {
     const r = await fetch('/api/stats', {cache:'no-store'});
     if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -119,23 +174,210 @@ async function refresh() {
     document.getElementById('c-domains').textContent = fmt(d.domains);
     document.getElementById('c-cache').textContent = fmt(d.cache_len);
     document.getElementById('c-uptime').textContent = uptime(d.uptime_seconds || 0);
-    const body = document.getElementById('top');
-    body.innerHTML = '';
-    (d.top || []).forEach((x, i) => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = '<td class="muted">' + (i+1) + '</td>' +
-        '<td></td>' +
-        '<td class="num">' + fmt(x.total) + '</td>' +
-        '<td class="num">' + fmt(x.current_minute) + '</td>' +
-        '<td class="num">' + fmt(x.peak_rpm) + '</td>';
-      tr.children[1].textContent = x.domain;
-      body.appendChild(tr);
-    });
     document.getElementById('status').textContent = 'обновлено ' + new Date().toLocaleTimeString('ru-RU');
   } catch (e) {
     document.getElementById('status').textContent = 'ошибка: ' + e.message;
   }
 }
+
+async function loadDomains() {
+  try {
+    const qs = '?page=' + page + '&limit=' + PAGE_SIZE + '&search=' + encodeURIComponent(search);
+    const r = await fetch('/api/domains' + qs, {cache:'no-store'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    page = d.page || 1;
+    pages = d.pages || 0;
+    renderRows(d.items || []);
+    renderPager(d);
+  } catch (e) {
+    document.getElementById('status').textContent = 'ошибка: ' + e.message;
+  }
+}
+
+function renderRows(items) {
+  const body = document.getElementById('top');
+  body.innerHTML = '';
+  if (!items.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 5;
+    td.className = 'muted';
+    td.textContent = search ? 'Ничего не найдено' : 'Пока нет данных';
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  items.forEach((x, i) => {
+    const tr = document.createElement('tr');
+    tr.className = 'clickable';
+    tr.title = 'Показать последний ответ';
+    tr.innerHTML = '<td class="muted">' + ((page - 1) * PAGE_SIZE + i + 1) + '</td>' +
+      '<td class="domain"></td>' +
+      '<td class="num">' + fmt(x.total) + '</td>' +
+      '<td class="num">' + fmt(x.current_minute) + '</td>' +
+      '<td class="num">' + fmt(x.peak_rpm) + '</td>';
+    tr.children[1].textContent = x.domain;
+    tr.addEventListener('click', () => showDomain(x.domain));
+    body.appendChild(tr);
+  });
+}
+
+function renderPager(d) {
+  const pager = document.getElementById('pager');
+  pager.innerHTML = '';
+  document.getElementById('domains-total').textContent = d.total ? 'Всего: ' + fmt(d.total) : '';
+  if (!d.pages) return;
+
+  const mk = (label, target, opts = {}) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    if (opts.active) b.className = 'active';
+    if (opts.disabled) b.disabled = true;
+    else b.addEventListener('click', () => goPage(target));
+    pager.appendChild(b);
+  };
+  mk('‹', d.page - 1, {disabled: d.page <= 1});
+  pageNumbers(d.page, d.pages).forEach(p => {
+    if (p === '…') {
+      const s = document.createElement('span');
+      s.className = 'muted';
+      s.textContent = '…';
+      pager.appendChild(s);
+    } else {
+      mk(String(p), p, {active: p === d.page});
+    }
+  });
+  mk('›', d.page + 1, {disabled: d.page >= d.pages});
+  const info = document.createElement('span');
+  info.className = 'muted';
+  info.style.marginLeft = '8px';
+  info.textContent = 'Стр. ' + d.page + ' из ' + d.pages;
+  pager.appendChild(info);
+}
+
+// pageNumbers возвращает окно номеров страниц с «…» для больших списков.
+function pageNumbers(current, total) {
+  if (total <= 9) return Array.from({length: total}, (_, i) => i + 1);
+  const set = new Set([1, total, current - 2, current - 1, current, current + 1, current + 2]);
+  const nums = [...set].filter(p => p >= 1 && p <= total).sort((a, b) => a - b);
+  const out = [];
+  nums.forEach((p, i) => {
+    if (i && p - nums[i - 1] > 1) out.push('…');
+    out.push(p);
+  });
+  return out;
+}
+
+function goPage(p) {
+  if (p < 1 || (pages && p > pages)) return;
+  page = p;
+  loadDomains();
+}
+
+function applySearch() {
+  search = document.getElementById('search').value.trim();
+  page = 1;
+  loadDomains();
+}
+
+function resetSearch() {
+  document.getElementById('search').value = '';
+  search = '';
+  page = 1;
+  loadDomains();
+}
+
+async function showDomain(name) {
+  const modal = document.getElementById('modal');
+  document.getElementById('m-title').textContent = name;
+  document.getElementById('m-meta').textContent = 'Загрузка…';
+  document.getElementById('m-last').textContent = '';
+  document.getElementById('m-last').className = '';
+  const err = document.getElementById('m-error');
+  err.className = 'msg';
+  err.textContent = '';
+  document.getElementById('m-records-wrap').classList.add('hide');
+  document.getElementById('m-auth-wrap').classList.add('hide');
+  modal.classList.remove('hide');
+  try {
+    const r = await fetch('/api/domain?name=' + encodeURIComponent(name), {cache:'no-store'});
+    if (!r.ok) throw new Error(r.status === 404 ? 'Нет данных по домену' : 'HTTP ' + r.status);
+    renderDomain(await r.json());
+  } catch (e) {
+    document.getElementById('m-meta').textContent = '';
+    err.className = 'msg err';
+    err.textContent = e.message;
+  }
+}
+
+function renderDomain(d) {
+  document.getElementById('m-title').textContent = d.domain;
+  document.getElementById('m-meta').textContent =
+    'Запросов: ' + fmt(d.total) + ' · RPM сейчас: ' + fmt(d.current_minute) + ' · Peak RPM: ' + fmt(d.peak_rpm);
+
+  const box = document.getElementById('m-last');
+  box.innerHTML = '';
+  box.className = '';
+  const last = d.last;
+  if (!last) {
+    box.className = 'muted';
+    box.textContent = 'Последний ответ ещё не зафиксирован.';
+    return;
+  }
+
+  const rcode = document.createElement('div');
+  const cls = last.rcode === 'NOERROR' ? 'rcode-ok' : last.rcode === 'NXDOMAIN' ? 'rcode-warn' : 'rcode-err';
+  rcode.innerHTML = 'Ответ: <b class="' + cls + '"></b>';
+  rcode.querySelector('b').textContent = last.rcode || '—';
+  box.appendChild(rcode);
+
+  const meta = document.createElement('div');
+  meta.className = 'muted';
+  meta.style.marginTop = '6px';
+  const when = last.at ? new Date(last.at).toLocaleString('ru-RU') : '—';
+  const parts = [
+    'Тип: ' + (last.qtype || '—'),
+    last.from_cache ? 'из кэша' : 'от апстрима',
+    last.upstream ? 'апстрим: ' + last.upstream : '',
+    'время: ' + when
+  ];
+  meta.textContent = parts.filter(Boolean).join(' · ');
+  box.appendChild(meta);
+
+  const err = document.getElementById('m-error');
+  err.className = 'msg';
+  err.textContent = '';
+  if (last.error) {
+    err.className = 'msg err';
+    err.textContent = 'Ошибка: ' + last.error;
+  }
+
+  const recWrap = document.getElementById('m-records-wrap');
+  const rec = document.getElementById('m-records');
+  if (last.records && last.records.length) {
+    rec.textContent = last.records.join('\n');
+    recWrap.classList.remove('hide');
+  } else {
+    recWrap.classList.add('hide');
+  }
+
+  const authWrap = document.getElementById('m-auth-wrap');
+  const auth = document.getElementById('m-auth');
+  if (last.authority && last.authority.length) {
+    auth.textContent = last.authority.join('\n');
+    authWrap.classList.remove('hide');
+  } else {
+    authWrap.classList.add('hide');
+  }
+}
+
+function closeModal(ev) {
+  if (ev && ev.target !== ev.currentTarget) return;
+  document.getElementById('modal').classList.add('hide');
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 
 async function flushCache() {
   if (!confirm('Очистить кэш DNS?')) return;

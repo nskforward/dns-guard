@@ -17,6 +17,7 @@ type Config struct {
 	Listen       Listen           `yaml:"listen"`
 	Web          Web              `yaml:"web"`
 	Cache        Cache            `yaml:"cache"`
+	Stats        Stats            `yaml:"stats"`
 	Upstream     Upstream         `yaml:"upstream"`
 	Groups       map[string]Group `yaml:"groups"`
 	DefaultGroup string           `yaml:"default_group"`
@@ -41,6 +42,12 @@ type Cache struct {
 	MaxEntries int    `yaml:"max_entries"`
 	MinTTL     uint32 `yaml:"min_ttl"` // минимальный TTL в секундах (пол)
 	MaxTTL     uint32 `yaml:"max_ttl"` // максимальный TTL в секундах (0 = без ограничения)
+}
+
+// Stats — параметры сбора статистики.
+type Stats struct {
+	// MaxDomains — лимит уникальных доменов в таблице статистики.
+	MaxDomains int `yaml:"max_domains"`
 }
 
 // Upstream — общие параметры обращения к вышестоящим серверам.
@@ -84,6 +91,7 @@ func Default() *Config {
 		Listen: Listen{UDP: ":53", TCP: ":53"},
 		Web:    Web{Enabled: true, Listen: ":8080"},
 		Cache:  Cache{Enabled: true, MaxEntries: 10000, MinTTL: 60, MaxTTL: 0},
+		Stats:  Stats{MaxDomains: 50000},
 		Upstream: Upstream{
 			Timeout: "3s",
 		},
@@ -168,6 +176,9 @@ func (c *Config) normalize() {
 	}
 	if c.Cache.MaxEntries <= 0 {
 		c.Cache.MaxEntries = 10000
+	}
+	if c.Stats.MaxDomains <= 0 {
+		c.Stats.MaxDomains = 50000
 	}
 	if c.Groups == nil {
 		c.Groups = map[string]Group{}

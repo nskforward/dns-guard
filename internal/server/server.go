@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -131,7 +132,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if c := s.cache; c != nil && st.cacheEnabled {
 		if msg, ok := c.Get(q, do); ok {
 			msg.Id = r.Id
-			s.record(q.Name, groupName, true, msg.Rcode)
+			s.record(q.Name, groupName, true, answerInfo(msg, q.Qtype, "", true))
 			writeReply(w, r, msg)
 			return
 		}
@@ -142,15 +143,15 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	up := r.Copy()
 	up.RecursionDesired = true
-	resp, _, err := group.Exchange(ctx, up)
+	resp, upstream, err := group.Exchange(ctx, up)
 	if err != nil {
 		s.log.Warn("upstream failed", "name", q.Name, "group", groupName, "err", err)
-		s.record(q.Name, groupName, false, dns.RcodeServerFailure)
+		s.record(q.Name, groupName, false, errorInfo(q.Qtype, err.Error()))
 		answer(w, r, dns.RcodeServerFailure)
 		return
 	}
 	if resp == nil {
-		s.record(q.Name, groupName, false, dns.RcodeServerFailure)
+		s.record(q.Name, groupName, false, errorInfo(q.Qtype, ""))
 		answer(w, r, dns.RcodeServerFailure)
 		return
 	}
@@ -163,7 +164,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if c := s.cache; c != nil && st.cacheEnabled {
 		c.Put(q, resp)
 	}
-	s.record(q.Name, groupName, false, resp.Rcode)
+	s.record(q.Name, groupName, false, answerInfo(resp, q.Qtype, upstream, false))
 	writeReply(w, r, resp)
 }
 
@@ -176,11 +177,57 @@ func (st *state) pick(qname string) (exchanger, string) {
 	return st.def, st.defName
 }
 
-func (s *Server) record(name, group string, hit bool, rcode int) {
+func (s *Server) record(name, group string, hit bool, info *stats.AnswerInfo) {
 	if s.stats == nil {
 		return
 	}
-	s.stats.Record(name, group, hit, rcode == dns.RcodeServerFailure)
+	s.stats.Record(name, group, hit, info)
+}
+
+// answerInfo описывает выданный ответ для страницы статистики.
+func answerInfo(m *dns.Msg, qtype uint16, upstream string, fromCache bool) *stats.AnswerInfo {
+	info := &stats.AnswerInfo{
+		Rcode:     rcodeName(m.Rcode),
+		Qtype:     typeName(qtype),
+		Upstream:  upstream,
+		FromCache: fromCache,
+	}
+	for _, rr := range m.Answer {
+		if _, ok := rr.(*dns.OPT); ok {
+			continue
+		}
+		info.Records = append(info.Records, rr.String())
+	}
+	for _, rr := range m.Ns {
+		if _, ok := rr.(*dns.OPT); ok {
+			continue
+		}
+		info.Authority = append(info.Authority, rr.String())
+	}
+	return info
+}
+
+// errorInfo описывает ответ, сформированный при ошибке апстрима.
+func errorInfo(qtype uint16, msg string) *stats.AnswerInfo {
+	return &stats.AnswerInfo{
+		Rcode: "SERVFAIL",
+		Qtype: typeName(qtype),
+		Error: msg,
+	}
+}
+
+func rcodeName(rcode int) string {
+	if name, ok := dns.RcodeToString[rcode]; ok {
+		return name
+	}
+	return fmt.Sprintf("RCODE%d", rcode)
+}
+
+func typeName(t uint16) string {
+	if name, ok := dns.TypeToString[t]; ok {
+		return name
+	}
+	return fmt.Sprintf("TYPE%d", t)
 }
 
 // writeReply отправляет ответ, обрезая его для UDP по размеру буфера клиента.

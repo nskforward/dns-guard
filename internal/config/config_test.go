@@ -175,6 +175,38 @@ default_group: g1
 	}
 }
 
+func TestStatsDefaultsAndParse(t *testing.T) {
+	if got := Default().Stats.MaxDomains; got != 50000 {
+		t.Fatalf("default max_domains = %d, want 50000", got)
+	}
+	cfg, err := Parse([]byte(`
+groups:
+  g1: {primary: ["1.1.1.1"]}
+default_group: g1
+stats:
+  max_domains: 1234
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.Stats.MaxDomains != 1234 {
+		t.Fatalf("max_domains = %d, want 1234", cfg.Stats.MaxDomains)
+	}
+	// Нулевое значение нормализуется к дефолту.
+	cfg, err = Parse([]byte(`
+groups:
+  g1: {primary: ["1.1.1.1"]}
+default_group: g1
+stats: {max_domains: 0}
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.Stats.MaxDomains != 50000 {
+		t.Fatalf("normalized max_domains = %d, want 50000", cfg.Stats.MaxDomains)
+	}
+}
+
 func TestYAMLRoundTrip(t *testing.T) {
 	cfg := Default()
 	cfg.Rules = []Rule{{Zone: "ru", Group: "default"}}
