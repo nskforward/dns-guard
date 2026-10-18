@@ -35,6 +35,9 @@
   .card.clickable:hover { border-color:var(--accent); }
   .card.clickable:active { border-color:var(--accent); }
   .card.clickable .k::after { content:" ↗"; color:var(--muted); }
+  /* Активная карточка-фильтр: таблица ниже показывает значения по ней. */
+  .card.clickable.selected { border-color:var(--accent); background:rgba(79,156,249,.10); }
+  .card.clickable.selected .k::after { content:none; }
 
   /* Tables */
   .table-wrap { margin-top:20px; overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:10px; }
@@ -70,7 +73,6 @@
   .muted { color:var(--muted); }
   button.act { background:var(--accent); color:#fff; border:none; padding:8px 16px; border-radius:8px; cursor:pointer; font-size:14px; -webkit-tap-highlight-color:transparent; }
   button.act.secondary { background:var(--panel); border:1px solid var(--line); color:var(--fg); }
-  button.act.secondary.active { background:rgba(248,81,73,.15); border-color:var(--err); color:var(--err); }
   button.act:active { filter:brightness(.9); }
   .search-row input[type=search] { flex:1 1 320px; max-width:560px; }
   input[type=search] { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px 12px; font-size:14px; min-width:0; }
@@ -238,12 +240,12 @@
 <main>
   <section id="view-dash">
     <div class="cards">
-      <div class="card"><div class="k">Requests</div><div class="v" id="c-total">—</div></div>
-      <div class="card clickable" onclick="showBad()" title="Show only domains with bad status"><div class="k">Bad answers</div><div class="v" id="c-bad">—</div></div>
+      <div class="card clickable" id="card-all" onclick="showAll()" title="Show all domains"><div class="k">All requests</div><div class="v" id="c-total">—</div></div>
+      <div class="card clickable" id="card-bad" onclick="showBad()" title="Show only domains with bad status"><div class="k">Bad answers</div><div class="v" id="c-bad">—</div></div>
       <div class="card"><div class="k">Cache hits</div><div class="v" id="c-hits">—</div></div>
       <div class="card"><div class="k">Hit rate</div><div class="v" id="c-rate">—</div></div>
       <div class="card clickable" onclick="showTab('sf')" title="Show SERVFAIL details"><div class="k">SERVFAIL</div><div class="v" id="c-servfail">—</div></div>
-      <div class="card clickable" onclick="showBlocked()" title="Show only blocked domains"><div class="k">Blocked</div><div class="v" id="c-blocked">—</div></div>
+      <div class="card clickable" id="card-blocked" onclick="showBlocked()" title="Show only blocked domains"><div class="k">Blocked</div><div class="v" id="c-blocked">—</div></div>
       <div class="card"><div class="k">Domains</div><div class="v" id="c-domains">—</div></div>
       <div class="card"><div class="k">Cache entries</div><div class="v" id="c-cache">—</div></div>
       <div class="card"><div class="k">Uptime</div><div class="v" id="c-uptime">—</div></div>
@@ -254,8 +256,6 @@
     </div>
     <div class="row search-row" style="margin-top:12px">
       <input type="search" id="search" placeholder="Search by domain (substring)" onkeydown="if (event.key === 'Enter') applySearch()" oninput="if (!this.value.trim() && search !== '') applySearch()">
-      <button id="blocked-toggle" class="act secondary" onclick="toggleBlockedOnly()" title="Show only blocked domains">Blocked only</button>
-      <button id="bad-toggle" class="act secondary" onclick="toggleBadOnly()" title="Show only domains with bad status">Bad only</button>
       <span id="domains-total" class="muted"></span>
     </div>
     <div class="table-wrap">
@@ -337,8 +337,7 @@ let timer = null;
 let activeTab = 'dash';
 let page = 1;
 let search = '';
-let blockedOnly = false;
-let badOnly = false;
+let domainFilter = 'all'; // 'all' | 'blocked' | 'bad'
 let pages = 0;
 let sfPage = 1;
 let sfPages = 0;
@@ -439,8 +438,8 @@ async function loadStats() {
 async function loadDomains() {
   try {
     const qs = '?page=' + page + '&limit=' + PAGE_SIZE + '&search=' + encodeURIComponent(search) +
-      (blockedOnly ? '&blocked=1' : '') +
-      (badOnly ? '&status=bad' : '');
+      (domainFilter === 'blocked' ? '&blocked=1' : '') +
+      (domainFilter === 'bad' ? '&status=bad' : '');
     const r = await fetch('/api/domains' + qs, {cache:'no-store'});
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
@@ -461,8 +460,8 @@ function renderRows(items) {
     const td = document.createElement('td');
     td.colSpan = 7;
     td.className = 'empty muted';
-    td.textContent = blockedOnly ? 'No blocked domains'
-      : badOnly ? 'No domains with bad status'
+    td.textContent = domainFilter === 'blocked' ? 'No blocked domains'
+      : domainFilter === 'bad' ? 'No domains with bad status'
       : search ? 'Nothing found' : 'No data yet';
     tr.appendChild(td);
     body.appendChild(tr);
@@ -555,34 +554,40 @@ async function toggleBlock(x) {
   }
 }
 
-// applyOnlyFilter — включает один из взаимоисключающих фильтров таблицы
-// («только заблокированные» или «только с плохим ответом»), обновляет
-// состояние кнопок и перезагружает список доменов.
-function applyOnlyFilter(blocked, bad) {
-  blockedOnly = blocked;
-  badOnly = bad;
+// updateFilterCards подсвечивает карточку, соответствующую текущему фильтру
+// таблицы: All requests (все домены), Bad answers или Blocked.
+function updateFilterCards() {
+  document.getElementById('card-all').classList.toggle('selected', domainFilter === 'all');
+  document.getElementById('card-bad').classList.toggle('selected', domainFilter === 'bad');
+  document.getElementById('card-blocked').classList.toggle('selected', domainFilter === 'blocked');
+}
+
+// setDomainFilter включает фильтр таблицы, обновляет подсветку карточек и
+// перезагружает список доменов.
+function setDomainFilter(f) {
+  domainFilter = f;
   page = 1;
-  document.getElementById('blocked-toggle').classList.toggle('active', blockedOnly);
-  document.getElementById('bad-toggle').classList.toggle('active', badOnly);
+  updateFilterCards();
   if (activeTab !== 'dash') { showTab('dash'); return; }
   loadDomains();
 }
 
-function setBlockedOnly(v) { applyOnlyFilter(v, false); }
+// showAll — клик по карточке All requests: показывает все домены.
+function showAll() {
+  if (domainFilter !== 'all') setDomainFilter('all');
+}
 
-function toggleBlockedOnly() { setBlockedOnly(!blockedOnly); }
+// showBlocked — клик по карточке Blocked: только заблокированные домены.
+// Повторный клик по активной карточке сбрасывает фильтр.
+function showBlocked() {
+  setDomainFilter(domainFilter === 'blocked' ? 'all' : 'blocked');
+}
 
-// showBlocked — клик по карточке Blocked: включает фильтр «только
-// заблокированные» и переходит на вкладку Stats.
-function showBlocked() { setBlockedOnly(true); }
-
-function setBadOnly(v) { applyOnlyFilter(false, v); }
-
-function toggleBadOnly() { setBadOnly(!badOnly); }
-
-// showBad — клик по карточке Bad answers: включает фильтр «только домены
-// с плохим последним ответом» (Status = Bad) и переходит на вкладку Stats.
-function showBad() { setBadOnly(true); }
+// showBad — клик по карточке Bad answers: только домены с плохим последним
+// ответом (Status = Bad). Повторный клик сбрасывает фильтр.
+function showBad() {
+  setDomainFilter(domainFilter === 'bad' ? 'all' : 'bad');
+}
 
 function renderPager(d) {
   document.getElementById('domains-total').textContent = d.total ? 'Total: ' + fmt(d.total) : '';
@@ -1089,6 +1094,7 @@ async function saveConfig() {
 }
 
 loadVersion();
+updateFilterCards();
 showTab(TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'dash');
 window.addEventListener('hashchange', () => {
   const which = location.hash.slice(1);
