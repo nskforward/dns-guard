@@ -63,10 +63,11 @@ type Attempt struct {
 }
 
 // Group — группа апстримов: список основных и резервных серверов.
-// Резервные используются при ошибке запроса к основным, а также когда основной
+// Резервные используются при ошибке запроса к основным, когда основной
 // сервер ответил NODATA (NOERROR без записей) на запрос A/AAAA — такой ответ
-// проверяется резервными. Для остальных типов NODATA считается штатным.
-// Фоновая проверка доступности не выполняется.
+// проверяется резервными, а также когда любой сервер ответил SERVFAIL:
+// это собственный сбой сервера, а не ответ о домене, поэтому опрашиваются
+// остальные серверы группы. Фоновая проверка доступности не выполняется.
 type Group struct {
 	Name     string
 	primary  []Resolver
@@ -103,11 +104,14 @@ func NewGroup(name string, g config.Group, timeout time.Duration) (*Group, error
 }
 
 // Exchange отправляет запрос: сначала основные серверы (в ротации), затем
-// резервные. Резервные используются при ошибке запроса, а также если основной
+// резервные. Резервные используются при ошибке запроса, если основной
 // сервер вернул NODATA (NOERROR без записей в Answer) на запрос A/AAAA: такой
-// ответ не принимается сразу, а проверяется резервными серверами. Для прочих
-// типов NODATA возвращается как есть. Если все ответившие серверы дали NODATA,
-// возвращается исходный ответ основного сервера.
+// ответ не принимается сразу, а проверяется резервными серверами, а также
+// когда любой сервер ответил SERVFAIL: это собственный сбой сервера (сбой
+// рекурсии, DNSSEC и т.п.), а не ответ о домене, поэтому опрашиваются
+// остальные серверы. Для прочих типов NODATA возвращается как есть.
+// Если все ответившие серверы дали NODATA, возвращается исходный ответ
+// основного сервера; если все — SERVFAIL, возвращается первый из них.
 //
 // Возвращает ответ, адрес ответившего сервера и список всех выполненных попыток
 // (в порядке обхода).
@@ -128,9 +132,11 @@ func (g *Group) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, string, []A
 	order = append(order, g.fallback...)
 
 	var (
-		lastErr      error
-		nodata       *dns.Msg // первый NODATA от основного сервера
-		nodataOrigin string
+		lastErr        error
+		nodata         *dns.Msg // первый NODATA от основного сервера
+		nodataOrigin   string
+		servfail       *dns.Msg // первый SERVFAIL — крайний ответ, если лучше нет
+		servfailOrigin string
 	)
 	attempts := make([]Attempt, 0, len(order))
 	for i, r := range order {
@@ -149,6 +155,16 @@ func (g *Group) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, string, []A
 			Rcode:    resp.Rcode,
 			Nodata:   isNoData(resp),
 		})
+		// SERVFAIL — сбой самого сервера, а не ответ о домене: запоминаем
+		// первый и опрашиваем остальные серверы, включая резерв. Бюджет
+		// таймаутов при этом почти не расходуется: такой ответ приходит быстро,
+		// в отличие от «висящего» сервера.
+		if resp.Rcode == dns.RcodeServerFailure {
+			if servfail == nil {
+				servfail, servfailOrigin = resp, r.String()
+			}
+			continue
+		}
 		if nodata == nil && isNoData(resp) && !isFallback && len(g.fallback) > 0 && shouldVerifyNoData(m) {
 			// NODATA от основного сервера может быть его ошибкой — проверяем
 			// резервными (и остальными основными до них). Проверяем только
@@ -164,6 +180,9 @@ func (g *Group) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, string, []A
 	}
 	if nodata != nil {
 		return nodata, nodataOrigin, attempts, nil
+	}
+	if servfail != nil {
+		return servfail, servfailOrigin, attempts, nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("all upstreams failed")

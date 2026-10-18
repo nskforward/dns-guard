@@ -72,6 +72,31 @@ func newDoHReplyServer(t *testing.T, positive bool) (*httptest.Server, *atomic.I
 	return srv, &hits
 }
 
+// newDoHServfailServer поднимает DoH-сервер, отвечающий rcode=SERVFAIL,
+// как это делает «сломавшийся» рекурсор. Возвращает сервер и счётчик
+// полученных запросов.
+func newDoHServfailServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		q := new(dns.Msg)
+		if err := q.Unpack(body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		resp := new(dns.Msg)
+		resp.SetReply(q)
+		resp.Rcode = dns.RcodeServerFailure
+		out, _ := resp.Pack()
+		w.Header().Set("Content-Type", dohContentType)
+		_, _ = w.Write(out)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
 func dohGroup(primary, fallback *httptest.Server) config.Group {
 	g := config.Group{Protocol: "doh", Primary: []string{primary.URL + "/dns-query"}}
 	if fallback != nil {
@@ -225,6 +250,131 @@ func TestGroupPositivePrimarySkipsFallback(t *testing.T) {
 	}
 	if fallbackHits.Load() != 0 || len(attempts) != 1 {
 		t.Fatalf("fallback hits/attempts = %d/%d, want 0/1", fallbackHits.Load(), len(attempts))
+	}
+}
+
+// TestGroupServfailFromPrimaryFallsBack проверяет, что SERVFAIL основного
+// сервера не отдаётся клиенту сразу, а проверяется резервом: положительный
+// ответ резерва выигрывает.
+func TestGroupServfailFromPrimaryFallsBack(t *testing.T) {
+	primary, primaryHits := newDoHServfailServer(t)
+	fallback, fallbackHits := newDoHReplyServer(t, true)
+
+	grp, err := NewGroup("g", dohGroup(primary, fallback), time.Second)
+	if err != nil {
+		t.Fatalf("new group: %v", err)
+	}
+	defer grp.Close()
+
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	resp, origin, attempts, err := grp.Exchange(context.Background(), q)
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if len(resp.Answer) != 1 || resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("resp = %+v, want A from fallback", resp)
+	}
+	if origin != fallback.URL {
+		t.Fatalf("origin = %q, want fallback %q", origin, fallback.URL)
+	}
+	if primaryHits.Load() != 1 || fallbackHits.Load() != 1 {
+		t.Fatalf("hits primary/fallback = %d/%d, want 1/1", primaryHits.Load(), fallbackHits.Load())
+	}
+	// Первая попытка — SERVFAIL основного, вторая — успешный ответ резерва.
+	if len(attempts) != 2 || attempts[0].Err != "" || attempts[1].Err != "" {
+		t.Fatalf("attempts = %+v", attempts)
+	}
+	if attempts[0].Rcode != dns.RcodeServerFailure || attempts[1].Rcode != dns.RcodeSuccess {
+		t.Fatalf("attempts = %+v, want SERVFAIL then NOERROR", attempts)
+	}
+}
+
+// TestGroupServfailNonAddressFallsBack проверяет, что в отличие от NODATA
+// SERVFAIL основного проверяется резервом для любых типов запроса, а не
+// только A/AAAA: SERVFAIL никогда не является штатным ответом.
+func TestGroupServfailNonAddressFallsBack(t *testing.T) {
+	primary, _ := newDoHServfailServer(t)
+	fallback, fallbackHits := newDoHReplyServer(t, true)
+
+	grp, err := NewGroup("g", dohGroup(primary, fallback), time.Second)
+	if err != nil {
+		t.Fatalf("new group: %v", err)
+	}
+	defer grp.Close()
+
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeHTTPS)
+	resp, origin, attempts, err := grp.Exchange(context.Background(), q)
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if len(resp.Answer) != 1 || origin != fallback.URL {
+		t.Fatalf("resp/origin = %+v/%q, want fallback answer", resp, origin)
+	}
+	if fallbackHits.Load() != 1 || len(attempts) != 2 {
+		t.Fatalf("fallback hits/attempts = %d/%d, want 1/2", fallbackHits.Load(), len(attempts))
+	}
+}
+
+// TestGroupServfailEverywhereKeepsPrimary проверяет, что если и резерв
+// ответил SERVFAIL, клиенту возвращается исходный SERVFAIL основного
+// сервера, а не ошибка канала.
+func TestGroupServfailEverywhereKeepsPrimary(t *testing.T) {
+	primary, _ := newDoHServfailServer(t)
+	fallback, _ := newDoHServfailServer(t)
+
+	grp, err := NewGroup("g", dohGroup(primary, fallback), time.Second)
+	if err != nil {
+		t.Fatalf("new group: %v", err)
+	}
+	defer grp.Close()
+
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	resp, origin, attempts, err := grp.Exchange(context.Background(), q)
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if resp == nil || resp.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("resp = %+v, want primary SERVFAIL", resp)
+	}
+	if origin != primary.URL {
+		t.Fatalf("origin = %q, want primary %q", origin, primary.URL)
+	}
+	if len(attempts) != 2 ||
+		attempts[0].Rcode != dns.RcodeServerFailure || attempts[1].Rcode != dns.RcodeServerFailure {
+		t.Fatalf("attempts = %+v, want SERVFAIL on both", attempts)
+	}
+}
+
+// TestGroupServfailPrimaryNodataFallback проверяет, что NODATA резерва при
+// SERVFAIL основного возвращается как валидный ответ: определённый негативный
+// ответ лучше, чем сбой резолвера.
+func TestGroupServfailPrimaryNodataFallback(t *testing.T) {
+	primary, _ := newDoHServfailServer(t)
+	fallback, _ := newDoHReplyServer(t, false)
+
+	grp, err := NewGroup("g", dohGroup(primary, fallback), time.Second)
+	if err != nil {
+		t.Fatalf("new group: %v", err)
+	}
+	defer grp.Close()
+
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	resp, origin, attempts, err := grp.Exchange(context.Background(), q)
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if resp == nil || resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 0 || len(resp.Ns) != 1 {
+		t.Fatalf("resp = %+v, want fallback NODATA", resp)
+	}
+	if origin != fallback.URL {
+		t.Fatalf("origin = %q, want fallback %q", origin, fallback.URL)
+	}
+	if len(attempts) != 2 || attempts[0].Rcode != dns.RcodeServerFailure || !attempts[1].Nodata {
+		t.Fatalf("attempts = %+v", attempts)
 	}
 }
 
