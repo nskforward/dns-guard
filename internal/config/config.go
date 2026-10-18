@@ -210,7 +210,7 @@ func (c *Config) Timeout() time.Duration {
 func Default() *Config {
 	return &Config{
 		Listen: Listen{UDP: ":53", TCP: ":53"},
-		Web:    Web{Enabled: true, Listen: ":8080"},
+		Web:    Web{Enabled: true, Listen: ":80"},
 		Cache:  Cache{Enabled: true, MaxEntries: 10000, MinTTL: 60, MaxTTL: 0},
 		Stats:  Stats{MaxDomains: 50000},
 		Upstream: Upstream{
@@ -323,7 +323,7 @@ func (c *Config) Normalize() {
 		c.Listen.TCP = ":53"
 	}
 	if c.Web.Listen == "" {
-		c.Web.Listen = ":8080"
+		c.Web.Listen = ":80"
 	}
 	c.ECS.Subnet = strings.TrimSpace(c.ECS.Subnet)
 	c.ECS.IPv6Subnet = strings.TrimSpace(c.ECS.IPv6Subnet)

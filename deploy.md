@@ -61,12 +61,12 @@ set -a; . ./.env; set +a
 | Параметр | Значение |
 |---|---|
 | Имя | `dns-guard` |
-| `remote-image` | `nskforward/dns-guard:1.0.7` |
+| `remote-image` | `nskforward/dns-guard:latest` |
 | `root-dir` | `/usb1/images/dns-guard` |
 | `interface` | `veth-dnsguard` (IP `192.168.89.3`) |
 | `mountlists` | `dns-guard-conf` (конфиг в `/etc/dns-guard/config.yaml`) |
 | `start-on-boot` | `yes` |
-| Веб-UI | `http://192.168.89.3:8080` |
+| Веб-UI | `http://192.168.89.3` |
 | Реестр | `https://registry-1.docker.io` |
 
 ## Проблема «курица и яйцо» с DNS — решена на роутере
@@ -150,6 +150,15 @@ curl -s "https://hub.docker.com/v2/repositories/nskforward/dns-guard/tags?page_s
 
 ### 4. Обновить образ
 
+Убедитесь, что контейнер настроен на тег `latest` (при необходимости
+переключите — например, если раньше была закреплена конкретная версия):
+
+```
+/container/set [find where name="dns-guard"] remote-image=nskforward/dns-guard:latest
+```
+
+Затем обновите образ:
+
 ```
 /container/update [find where name="dns-guard"]
 ```
@@ -189,9 +198,9 @@ curl -s "https://hub.docker.com/v2/repositories/nskforward/dns-guard/tags?page_s
 
 ```sh
 # веб-UI и API контейнера
-curl -s http://192.168.89.3:8080/api/health        # {"status":"ok"}
-curl -s http://192.168.89.3:8080/api/version       # {"version":"1.0.7"}
-curl -s http://192.168.89.3:8080/api/upstreams     # статистика по группам
+curl -s http://192.168.89.3/api/health        # {"status":"ok"}
+curl -s http://192.168.89.3/api/version       # {"version":"1.1.0"}
+curl -s http://192.168.89.3/api/upstreams     # статистика по группам
 
 # DNS через роутер (UDP и TCP)
 dig @192.168.88.1 example.com A +short
@@ -287,6 +296,8 @@ dig @192.168.88.1 ya.ru A +tcp +short
 
 ## Что важно помнить
 
+- `remote-image` должен указывать на `nskforward/dns-guard:latest`: при
+  закреплённой версии `update` не подтянет новый образ.
 - `update` нужно выполнять **на остановленном** контейнере; команда
   асинхронная — дождитесь статуса `S`, не запускайте повторно.
 - Реестр Docker Hub резолвится через FWD-записи `container registry` —

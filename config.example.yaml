@@ -7,7 +7,7 @@ listen:
 
 web:
   enabled: true
-  listen: ":8080"
+  listen: ":80"
 
 cache:
   enabled: true

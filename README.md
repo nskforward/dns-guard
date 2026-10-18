@@ -46,8 +46,7 @@ MIN/MAX-TTL, кэширует ответы в памяти и показывае
 
 Готовый образ публикуется в Docker Hub:
 [`nskforward/dns-guard`](https://hub.docker.com/r/nskforward/dns-guard).
-Тег `latest` — последняя версия; для воспроизводимого деплоя используйте
-конкретный тег (`nskforward/dns-guard:1.0.7`).
+Используется тег `latest` — он всегда указывает на последнюю версию.
 
 ```sh
 cp config.example.yaml config.yaml
@@ -57,7 +56,7 @@ docker pull nskforward/dns-guard:latest
 docker run -d --name dns-guard \
   --restart unless-stopped \
   -p 53:53/udp -p 53:53/tcp \
-  -p 8080:8080 \
+  -p 80:80 \
   -v "$PWD/config.yaml:/etc/dns-guard/config.yaml" \
   nskforward/dns-guard:latest
 ```
@@ -81,14 +80,15 @@ docker run ... nskforward/dns-guard:latest -log-level debug
 ```sh
 dig @127.0.0.1 example.com A     # UDP
 dig @127.0.0.1 example.com A +tcp # TCP
-curl -s localhost:8080/api/health
+curl -s localhost/api/health
 ```
 
 ## Веб-интерфейс
 
-Веб-UI доступен по адресу `http://<ip-контейнера>:8080`: статистика запросов и
+Веб-UI доступен по адресу `http://<ip-контейнера>`: статистика запросов и
 кэша, домены с поиском и пиковым RPM, вкладки Upstreams и SERVFAIL, а также
-редактирование конфигурации с применением на лету. На вкладке Stats у каждого
+редактирование конфигурации с применением на лету. Веб-сервер слушает порт 80,
+поэтому указывать порт в браузере не нужно. На вкладке Stats у каждого
 домена есть иконка блокировки: клик блокирует домен и его поддомены (повторный
 клик снимает блокировку), заблокированные строки подсвечиваются красным, а
 фильтр **Blocked only** (и карточка **Blocked**) показывает только их.
@@ -98,7 +98,7 @@ curl -s localhost:8080/api/health
 ## Конфигурация
 
 > **Конфигурацию можно менять прямо в веб-интерфейсе контейнера.** Откройте
-> `http://<ip-контейнера>:8080`, вкладка **Config**, отредактируйте YAML и
+> `http://<ip-контейнера>`, вкладка **Config**, отредактируйте YAML и
 > нажмите **Save**. Конфиг валидируется, применяется на лету (**live reload**,
 > без перезапуска контейнера) и сохраняется в смонтированный `config.yaml`.
 > Ошибочная конфигурация не применяется — UI покажет текст ошибки. То же самое
@@ -113,7 +113,7 @@ listen:
   tcp: ":53"
 web:
   enabled: true
-  listen: ":8080"
+  listen: ":80"
 cache:
   enabled: true
   max_entries: 10000
@@ -486,7 +486,7 @@ RouterOS кэширует ответы без учёта ECS и иначе от�
 | Метод | Путь | Описание |
 |---|---|---|
 | GET | `/api/health` | `{"status":"ok"}` |
-| GET | `/api/version` | `{"version":"1.0.4"}` — версия сборки (в UI отображается в шапке) |
+| GET | `/api/version` | `{"version":"1.1.0"}` — версия сборки (в UI отображается в шапке) |
 | GET | `/api/stats` | общие счётчики, uptime, размер кэша, распределение по группам |
 | GET | `/api/domains` | страница доменов: `?page=1&limit=50&search=подстрока&blocked=1` (только заблокированные) |
 | GET | `/api/domain` | статистика домена и сводные сведения: успешные записи по домену (склейка ответов по qtype) и последние негативные ответы NODATA/NXDOMAIN по типам с цепочкой апстримов: `?name=example.com` |
@@ -532,13 +532,13 @@ Authority), склеенные из последних успешных отве
 Пример:
 
 ```sh
-curl -s localhost:8080/api/stats | jq
-curl -s 'localhost:8080/api/domains?page=1&limit=50&search=example' | jq
-curl -s 'localhost:8080/api/domain?name=example.com' | jq
-curl -s localhost:8080/api/upstreams | jq
-curl -s -X PUT 'localhost:8080/api/block?name=ads.example.com' | jq
-curl -s -X DELETE 'localhost:8080/api/block?name=ads.example.com' | jq
-curl -s -X PUT localhost:8080/api/config \
+curl -s localhost/api/stats | jq
+curl -s 'localhost/api/domains?page=1&limit=50&search=example' | jq
+curl -s 'localhost/api/domain?name=example.com' | jq
+curl -s localhost/api/upstreams | jq
+curl -s -X PUT 'localhost/api/block?name=ads.example.com' | jq
+curl -s -X DELETE 'localhost/api/block?name=ads.example.com' | jq
+curl -s -X PUT localhost/api/config \
   --data-binary @config.yaml -H 'Content-Type: application/x-yaml'
 ```
 
@@ -615,7 +615,7 @@ VPN-маршрутизацией через `address-list` (см. предупр
 /ip/dns/set servers=77.88.8.8,8.8.8.8
 ```
 
-Веб-UI будет доступен по адресу `http://192.168.89.3:8080`.
+Веб-UI будет доступен по адресу `http://192.168.89.3`.
 
 ### 6. Проверка VPN-маршрутизации
 

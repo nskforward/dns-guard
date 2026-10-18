@@ -21,7 +21,7 @@ default_group: g1
 	if cfg.Groups["g1"].Protocol != "udp" {
 		t.Fatalf("protocol = %q, want udp", cfg.Groups["g1"].Protocol)
 	}
-	if cfg.Listen.UDP != ":53" || cfg.Web.Listen != ":8080" {
+	if cfg.Listen.UDP != ":53" || cfg.Web.Listen != ":80" {
 		t.Fatalf("normalize failed: %+v", cfg.Listen)
 	}
 	if cfg.Timeout().String() != "3s" {

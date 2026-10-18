@@ -28,7 +28,7 @@ COPY --from=build /out/dns-guard /usr/local/bin/dns-guard
 
 EXPOSE 53/udp
 EXPOSE 53/tcp
-EXPOSE 8080
+EXPOSE 80
 
 ENTRYPOINT ["/usr/local/bin/dns-guard"]
 CMD ["-config", "/etc/dns-guard/config.yaml"]
