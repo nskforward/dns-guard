@@ -5,7 +5,10 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -53,21 +56,36 @@ func New(proto, addr string, bootstrap []string, hosts map[string]string, timeou
 
 // Attempt — одна попытка обращения к апстриму группы.
 // Err пуст, если сервер ответил; Elapsed — длительность попытки. Rcode и
-// Nodata описывают ответ сервера (для отображения цепочки в UI).
+// Nodata описывают ответ сервера (для отображения цепочки в UI). Timeout
+// отмечает попытку, завершившуюся по превышению времени ожидания.
 type Attempt struct {
 	Upstream string
 	Err      string
 	Elapsed  time.Duration
 	Rcode    int  // код ответа сервера; 0, если попытка завершилась ошибкой
 	Nodata   bool // NOERROR без записей в секции Answer
+	Timeout  bool // сервер не ответил за отведённое время
+}
+
+// IsTimeout сообщает, что ошибка обращения к апстриму вызвана превышением
+// времени ожидания ответа: сработал таймаут резолвера или общий бюджет запроса.
+func IsTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // Group — группа апстримов: список основных и резервных серверов.
-// Резервные используются при ошибке запроса к основным, когда основной
-// сервер ответил NODATA (NOERROR без записей) на запрос A/AAAA — такой ответ
-// проверяется резервными, а также когда любой сервер ответил SERVFAIL:
-// это собственный сбой сервера, а не ответ о домене, поэтому опрашиваются
-// остальные серверы группы. Фоновая проверка доступности не выполняется.
+// Резервные используются при ошибке запроса к основным, а также когда основной
+// сервер ответил проблемно: NODATA (NOERROR без записей), NXDOMAIN, SERVFAIL
+// или любым другим кодом, кроме NOERROR с записями. Такой ответ не считается
+// окончательным и проверяется остальными серверами группы, независимо от типа
+// запроса. Фоновая проверка доступности не выполняется.
 type Group struct {
 	Name     string
 	primary  []Resolver
@@ -104,14 +122,16 @@ func NewGroup(name string, g config.Group, timeout time.Duration) (*Group, error
 }
 
 // Exchange отправляет запрос: сначала основные серверы (в ротации), затем
-// резервные. Резервные используются при ошибке запроса, если основной
-// сервер вернул NODATA (NOERROR без записей в Answer) на запрос A/AAAA: такой
-// ответ не принимается сразу, а проверяется резервными серверами, а также
-// когда любой сервер ответил SERVFAIL: это собственный сбой сервера (сбой
-// рекурсии, DNSSEC и т.п.), а не ответ о домене, поэтому опрашиваются
-// остальные серверы. Для прочих типов NODATA возвращается как есть.
-// Если все ответившие серверы дали NODATA, возвращается исходный ответ
-// основного сервера; если все — SERVFAIL, возвращается первый из них.
+// резервные. Окончательным считается только успешный ответ — NOERROR с хотя бы
+// одной записью в секции Answer. Любой другой ответ (NODATA, NXDOMAIN, SERVFAIL,
+// REFUSED и прочие коды) от основного сервера проверяется остальными серверами
+// группы, независимо от типа запроса: NODATA и NXDOMAIN могут быть подменой или
+// ошибкой резолвера, а SERVFAIL и необычные коды — его собственным сбоем.
+//
+// Если ни один сервер не дал успешного ответа, возвращается лучший из
+// полученных: определённый ответ о домене (NODATA/NXDOMAIN) предпочтительнее
+// сбоя (SERVFAIL и прочие коды), а внутри одного класса выигрывает первый по
+// порядку обхода — то есть ответ основного сервера.
 //
 // Возвращает ответ, адрес ответившего сервера и список всех выполненных попыток
 // (в порядке обхода).
@@ -131,22 +151,31 @@ func (g *Group) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, string, []A
 	}
 	order = append(order, g.fallback...)
 
+	// candidate — ответ сервера, не являющийся окончательным. Кандидаты двух
+	// классов: определённый ответ о домене (NODATA/NXDOMAIN) и сбой сервера
+	// (SERVFAIL и прочие коды). Хранится первый ответ каждого класса.
+	type candidate struct {
+		resp   *dns.Msg
+		origin string
+	}
 	var (
-		lastErr        error
-		nodata         *dns.Msg // первый NODATA от основного сервера
-		nodataOrigin   string
-		servfail       *dns.Msg // первый SERVFAIL — крайний ответ, если лучше нет
-		servfailOrigin string
+		lastErr  error
+		definite *candidate // NODATA/NXDOMAIN — определённый ответ о домене
+		failure  *candidate // SERVFAIL и прочие коды — сбой сервера
 	)
 	attempts := make([]Attempt, 0, len(order))
-	for i, r := range order {
-		isFallback := i >= len(g.primary)
+	for _, r := range order {
 		attemptStart := time.Now()
 		resp, err := r.Exchange(ctx, m)
 		elapsed := time.Since(attemptStart)
 		if err != nil {
 			lastErr = err
-			attempts = append(attempts, Attempt{Upstream: r.String(), Err: err.Error(), Elapsed: elapsed})
+			attempts = append(attempts, Attempt{
+				Upstream: r.String(),
+				Err:      err.Error(),
+				Elapsed:  elapsed,
+				Timeout:  IsTimeout(err),
+			})
 			continue
 		}
 		attempts = append(attempts, Attempt{
@@ -155,39 +184,40 @@ func (g *Group) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, string, []A
 			Rcode:    resp.Rcode,
 			Nodata:   isNoData(resp),
 		})
-		// SERVFAIL — сбой самого сервера, а не ответ о домене: запоминаем
-		// первый и опрашиваем остальные серверы, включая резерв. Бюджет
-		// таймаутов при этом почти не расходуется: такой ответ приходит быстро,
-		// в отличие от «висящего» сервера.
-		if resp.Rcode == dns.RcodeServerFailure {
-			if servfail == nil {
-				servfail, servfailOrigin = resp, r.String()
+		// Успешный ответ с записями — окончательный.
+		if isGoodAnswer(resp) {
+			return resp, r.String(), attempts, nil
+		}
+		// Проблемный ответ не отдаётся сразу: проверяем остальные серверы
+		// группы в надежде получить реальные записи. Определённый негатив
+		// (NODATA/NXDOMAIN) может оказаться подменой или ошибкой резолвера,
+		// а SERVFAIL и необычные коды — его собственным сбоем.
+		if isDefiniteNegative(resp) {
+			if definite == nil {
+				definite = &candidate{resp: resp, origin: r.String()}
 			}
-			continue
+		} else if failure == nil {
+			failure = &candidate{resp: resp, origin: r.String()}
 		}
-		if nodata == nil && isNoData(resp) && !isFallback && len(g.fallback) > 0 && shouldVerifyNoData(m) {
-			// NODATA от основного сервера может быть его ошибкой — проверяем
-			// резервными (и остальными основными до них). Проверяем только
-			// A/AAAA: для остальных типов NODATA — обычное дело.
-			nodata, nodataOrigin = resp, r.String()
-			continue
-		}
-		if nodata != nil && isNoData(resp) {
-			// Проверяющий сервер тоже ответил NODATA — ищем дальше.
-			continue
-		}
-		return resp, r.String(), attempts, nil
 	}
-	if nodata != nil {
-		return nodata, nodataOrigin, attempts, nil
+	// Ни один сервер не дал записей: определённый ответ о домене лучше сбоя,
+	// внутри класса — первый по порядку обхода (ответ основного сервера).
+	if definite != nil {
+		return definite.resp, definite.origin, attempts, nil
 	}
-	if servfail != nil {
-		return servfail, servfailOrigin, attempts, nil
+	if failure != nil {
+		return failure.resp, failure.origin, attempts, nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("all upstreams failed")
 	}
 	return nil, "", attempts, lastErr
+}
+
+// isGoodAnswer сообщает, что ответ содержит реальные данные: NOERROR и хотя бы
+// одна запись в секции Answer. Только такой ответ считается окончательным.
+func isGoodAnswer(m *dns.Msg) bool {
+	return m != nil && m.Rcode == dns.RcodeSuccess && len(m.Answer) > 0
 }
 
 // isNoData сообщает, что ответ не содержит записей (NODATA): NOERROR и пустая
@@ -196,20 +226,10 @@ func isNoData(m *dns.Msg) bool {
 	return m != nil && m.Rcode == dns.RcodeSuccess && len(m.Answer) == 0
 }
 
-// shouldVerifyNoData сообщает, нужно ли проверять NODATA резервными серверами.
-// Проверка выполняется только для адресных запросов A/AAAA: для остальных типов
-// (например, HTTPS/SVCB) NODATA — штатный ответ, и лишние обращения к резерву
-// только добавляли бы задержку.
-func shouldVerifyNoData(m *dns.Msg) bool {
-	if len(m.Question) != 1 {
-		return false
-	}
-	switch m.Question[0].Qtype {
-	case dns.TypeA, dns.TypeAAAA:
-		return true
-	default:
-		return false
-	}
+// isDefiniteNegative сообщает, что ответ является определённым ответом о домене
+// (NODATA или NXDOMAIN), а не сбоем сервера.
+func isDefiniteNegative(m *dns.Msg) bool {
+	return m != nil && (m.Rcode == dns.RcodeNameError || isNoData(m))
 }
 
 // Close закрывает все резолверы группы.

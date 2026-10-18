@@ -2,6 +2,8 @@ package upstream
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -72,10 +74,10 @@ func newDoHReplyServer(t *testing.T, positive bool) (*httptest.Server, *atomic.I
 	return srv, &hits
 }
 
-// newDoHServfailServer поднимает DoH-сервер, отвечающий rcode=SERVFAIL,
-// как это делает «сломавшийся» рекурсор. Возвращает сервер и счётчик
+// newDoHRcodeServer поднимает DoH-сервер, отвечающий заданным rcode без
+// записей, как это делает «сломавшийся» рекурсор. Возвращает сервер и счётчик
 // полученных запросов.
-func newDoHServfailServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+func newDoHRcodeServer(t *testing.T, rcode int) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -88,13 +90,21 @@ func newDoHServfailServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
 		}
 		resp := new(dns.Msg)
 		resp.SetReply(q)
-		resp.Rcode = dns.RcodeServerFailure
+		resp.Rcode = rcode
 		out, _ := resp.Pack()
 		w.Header().Set("Content-Type", dohContentType)
 		_, _ = w.Write(out)
 	}))
 	t.Cleanup(srv.Close)
 	return srv, &hits
+}
+
+// newDoHServfailServer поднимает DoH-сервер, отвечающий rcode=SERVFAIL,
+// как это делает «сломавшийся» рекурсор. Возвращает сервер и счётчик
+// полученных запросов.
+func newDoHServfailServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	return newDoHRcodeServer(t, dns.RcodeServerFailure)
 }
 
 func dohGroup(primary, fallback *httptest.Server) config.Group {
@@ -199,10 +209,10 @@ func TestGroupNodataWithoutFallbackReturnsImmediately(t *testing.T) {
 	}
 }
 
-// TestGroupNodataNonAddressDoesNotFallBack проверяет, что NODATA для типов,
-// отличных от A/AAAA (например, HTTPS/SVCB), не проверяется резервом: такой
-// NODATA — штатный ответ.
-func TestGroupNodataNonAddressDoesNotFallBack(t *testing.T) {
+// TestGroupNodataNonAddressFallsBack проверяет, что NODATA для типов, отличных
+// от A/AAAA (например, HTTPS/SVCB), тоже проверяется резервом: такой ответ
+// может быть ошибкой основного резолвера, а не ответом о домене.
+func TestGroupNodataNonAddressFallsBack(t *testing.T) {
 	primary, primaryHits := newDoHReplyServer(t, false)
 	fallback, fallbackHits := newDoHReplyServer(t, true)
 
@@ -214,16 +224,138 @@ func TestGroupNodataNonAddressDoesNotFallBack(t *testing.T) {
 
 	q := new(dns.Msg)
 	q.SetQuestion("example.com.", dns.TypeHTTPS)
-	resp, _, attempts, err := grp.Exchange(context.Background(), q)
+	resp, origin, attempts, err := grp.Exchange(context.Background(), q)
 	if err != nil {
 		t.Fatalf("exchange: %v", err)
 	}
-	if resp == nil || resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 0 {
-		t.Fatalf("resp = %+v, want NODATA", resp)
+	if resp == nil || resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 1 {
+		t.Fatalf("resp = %+v, want A from fallback", resp)
 	}
-	if primaryHits.Load() != 1 || fallbackHits.Load() != 0 || len(attempts) != 1 {
-		t.Fatalf("hits primary/fallback = %d/%d, attempts = %d, want 1/0 and 1",
+	if origin != fallback.URL {
+		t.Fatalf("origin = %q, want fallback %q", origin, fallback.URL)
+	}
+	if primaryHits.Load() != 1 || fallbackHits.Load() != 1 || len(attempts) != 2 {
+		t.Fatalf("hits primary/fallback = %d/%d, attempts = %d, want 1/1 and 2",
 			primaryHits.Load(), fallbackHits.Load(), len(attempts))
+	}
+	if !attempts[0].Nodata || attempts[1].Nodata {
+		t.Fatalf("attempts = %+v", attempts)
+	}
+}
+
+// TestGroupNxdomainFromPrimaryFallsBack проверяет, что NXDOMAIN основного
+// сервера не отдаётся клиенту сразу: положительный ответ резерва выигрывает.
+func TestGroupNxdomainFromPrimaryFallsBack(t *testing.T) {
+	primary, primaryHits := newDoHRcodeServer(t, dns.RcodeNameError)
+	fallback, fallbackHits := newDoHReplyServer(t, true)
+
+	grp, err := NewGroup("g", dohGroup(primary, fallback), time.Second)
+	if err != nil {
+		t.Fatalf("new group: %v", err)
+	}
+	defer grp.Close()
+
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	resp, origin, attempts, err := grp.Exchange(context.Background(), q)
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if len(resp.Answer) != 1 || resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("resp = %+v, want A from fallback", resp)
+	}
+	if origin != fallback.URL {
+		t.Fatalf("origin = %q, want fallback %q", origin, fallback.URL)
+	}
+	if primaryHits.Load() != 1 || fallbackHits.Load() != 1 || len(attempts) != 2 {
+		t.Fatalf("hits primary/fallback = %d/%d, attempts = %d, want 1/1 and 2",
+			primaryHits.Load(), fallbackHits.Load(), len(attempts))
+	}
+	if attempts[0].Rcode != dns.RcodeNameError || attempts[1].Rcode != dns.RcodeSuccess {
+		t.Fatalf("attempts = %+v, want NXDOMAIN then NOERROR", attempts)
+	}
+}
+
+// TestGroupNxdomainEverywhereKeepsPrimary проверяет, что если все серверы
+// ответили NXDOMAIN, клиенту возвращается исходный NXDOMAIN основного.
+func TestGroupNxdomainEverywhereKeepsPrimary(t *testing.T) {
+	primary, _ := newDoHRcodeServer(t, dns.RcodeNameError)
+	fallback, _ := newDoHRcodeServer(t, dns.RcodeNameError)
+
+	grp, err := NewGroup("g", dohGroup(primary, fallback), time.Second)
+	if err != nil {
+		t.Fatalf("new group: %v", err)
+	}
+	defer grp.Close()
+
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	resp, origin, attempts, err := grp.Exchange(context.Background(), q)
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if resp == nil || resp.Rcode != dns.RcodeNameError {
+		t.Fatalf("resp = %+v, want primary NXDOMAIN", resp)
+	}
+	if origin != primary.URL {
+		t.Fatalf("origin = %q, want primary %q", origin, primary.URL)
+	}
+	if len(attempts) != 2 ||
+		attempts[0].Rcode != dns.RcodeNameError || attempts[1].Rcode != dns.RcodeNameError {
+		t.Fatalf("attempts = %+v, want NXDOMAIN on both", attempts)
+	}
+}
+
+// TestGroupRefusedFromPrimaryFallsBack проверяет, что любой необычный код
+// ответа основного сервера (например, REFUSED) проверяется резервом.
+func TestGroupRefusedFromPrimaryFallsBack(t *testing.T) {
+	primary, _ := newDoHRcodeServer(t, dns.RcodeRefused)
+	fallback, fallbackHits := newDoHReplyServer(t, true)
+
+	grp, err := NewGroup("g", dohGroup(primary, fallback), time.Second)
+	if err != nil {
+		t.Fatalf("new group: %v", err)
+	}
+	defer grp.Close()
+
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	resp, origin, attempts, err := grp.Exchange(context.Background(), q)
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if len(resp.Answer) != 1 || origin != fallback.URL {
+		t.Fatalf("resp/origin = %+v/%q, want fallback answer", resp, origin)
+	}
+	if fallbackHits.Load() != 1 || len(attempts) != 2 {
+		t.Fatalf("fallback hits/attempts = %d/%d, want 1/2", fallbackHits.Load(), len(attempts))
+	}
+	if attempts[0].Rcode != dns.RcodeRefused {
+		t.Fatalf("attempts = %+v, want REFUSED first", attempts)
+	}
+}
+
+// TestGroupNxdomainPrimaryNodataFallback проверяет приоритет определённых
+// ответов: NXDOMAIN/NODATA резерва предпочтительнее сбоя основного, но при
+// двух определённых негативах остаётся ответ основного.
+func TestGroupNxdomainPrimaryNodataFallback(t *testing.T) {
+	primary, _ := newDoHRcodeServer(t, dns.RcodeNameError)
+	fallback, _ := newDoHReplyServer(t, false)
+
+	grp, err := NewGroup("g", dohGroup(primary, fallback), time.Second)
+	if err != nil {
+		t.Fatalf("new group: %v", err)
+	}
+	defer grp.Close()
+
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	resp, origin, _, err := grp.Exchange(context.Background(), q)
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if resp == nil || resp.Rcode != dns.RcodeNameError || origin != primary.URL {
+		t.Fatalf("resp/origin = %+v/%q, want primary NXDOMAIN", resp, origin)
 	}
 }
 
@@ -414,5 +546,68 @@ func TestGroupMixedProtocolFallback(t *testing.T) {
 	// Две попытки: неудачный primary и успешный DoH-fallback.
 	if len(attempts) != 2 || attempts[0].Err == "" || attempts[1].Err != "" {
 		t.Fatalf("attempts = %+v", attempts)
+	}
+}
+
+// TestGroupTimeoutFromPrimaryFallsBack проверяет, что таймаут основного
+// сервера не отдаётся клиенту: попытка помечается Timeout, а запрос уходит
+// следующим серверам группы, включая резерв.
+func TestGroupTimeoutFromPrimaryFallsBack(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		http.Error(w, "too late", http.StatusGatewayTimeout)
+	}))
+	t.Cleanup(slow.Close)
+	fallback, fallbackHits := newDoHReplyServer(t, true)
+
+	g := config.Group{
+		Protocol: "doh",
+		Primary:  []string{slow.URL + "/dns-query"},
+		Fallback: []string{fallback.URL + "/dns-query"},
+	}
+	grp, err := NewGroup("g", g, 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("new group: %v", err)
+	}
+	defer grp.Close()
+
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	resp, origin, attempts, err := grp.Exchange(context.Background(), q)
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if resp == nil || len(resp.Answer) != 1 || origin != fallback.URL {
+		t.Fatalf("resp/origin = %+v/%q, want fallback answer", resp, origin)
+	}
+	if fallbackHits.Load() != 1 || len(attempts) != 2 {
+		t.Fatalf("fallback hits/attempts = %d/%d, want 1/2", fallbackHits.Load(), len(attempts))
+	}
+	if !attempts[0].Timeout || attempts[0].Err == "" {
+		t.Fatalf("attempt[0] = %+v, want timeout with error text", attempts[0])
+	}
+	if attempts[1].Timeout || attempts[1].Err != "" || attempts[1].Rcode != dns.RcodeSuccess {
+		t.Fatalf("attempt[1] = %+v, want success", attempts[1])
+	}
+}
+
+// TestIsTimeout проверяет классификацию ошибок превышения времени ожидания.
+func TestIsTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"deadline", context.DeadlineExceeded, true},
+		{"wrapped deadline", fmt.Errorf("doh: %w", context.DeadlineExceeded), true},
+		{"net timeout", &net.DNSError{Err: "i/o timeout", IsTimeout: true}, true},
+		{"refused", &net.DNSError{Err: "connection refused"}, false},
+		{"plain", errors.New("boom"), false},
+	}
+	for _, tc := range cases {
+		if got := IsTimeout(tc.err); got != tc.want {
+			t.Errorf("%s: IsTimeout = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

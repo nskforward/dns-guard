@@ -849,7 +849,8 @@ function renderLast(last) {
     rows.push(['Reason', 'BLOCKED', 'rcode-err']);
     if (last.blocked_by) rows.push(['Blocked by', last.blocked_by]);
   } else if (!ok) {
-    rows.push(['Reason', last.error || (nodata ? 'NODATA' : (last.rcode || '—')), nodata ? 'rcode-warn' : 'rcode-err']);
+    const reason = last.timeout ? 'Timeout' : (last.error || (nodata ? 'NODATA' : (last.rcode || '—')));
+    rows.push(['Reason', reason, nodata && !last.timeout ? 'rcode-warn' : 'rcode-err']);
   }
   rows.push(['Type', last.qtype || '—']);
   rows.push(['Source', sourceLabel(last, blocked)]);
@@ -898,7 +899,7 @@ function appendAttempts(card, last) {
     const st = document.createElement('span');
     st.className = 'a-st';
     st.textContent = a.error || a.status || '—';
-    if (a.error || a.status === 'ERROR' || a.status === 'SERVFAIL') st.classList.add('rcode-err');
+    if (a.error || a.status === 'ERROR' || a.status === 'SERVFAIL' || a.status === 'Timeout') st.classList.add('rcode-err');
     else if (a.status === 'NODATA' || a.status === 'NXDOMAIN') st.classList.add('rcode-warn');
     else if (a.status === 'OK') st.classList.add('rcode-ok');
     const dur = document.createElement('span');

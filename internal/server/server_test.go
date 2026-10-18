@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"sync"
@@ -310,6 +311,47 @@ func TestServeDNSServfailAttemptChain(t *testing.T) {
 		got[0].Upstream != "https://doh.example/dns-query" || got[0].Status != "ERROR" ||
 		got[1].Upstream != "udp://77.88.8.8:53" || got[1].Status != "SERVFAIL" {
 		t.Fatalf("attempts = %+v", got)
+	}
+}
+
+// TestServeDNSServfailTimeout проверяет, что таймаут апстрима показывается в
+// карточке как Reason=Timeout, без длинного текста ошибки в ответе и попытках.
+func TestServeDNSServfailTimeout(t *testing.T) {
+	timeoutErr := fmt.Errorf("doh https://doh.example/dns-query: %w", context.DeadlineExceeded)
+	fa := &fakeExchanger{
+		err: timeoutErr,
+		attempts: []upstream.Attempt{{
+			Upstream: "https://doh.example/dns-query",
+			Err:      `Get "https://doh.example/dns-query": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`,
+			Timeout:  true,
+			Elapsed:  3 * time.Second,
+		}},
+	}
+	ss := stats.New(0)
+	s := newTestServer(testState(fa, fa, 60), nil, ss)
+
+	w := &mockWriter{}
+	s.ServeDNS(w, query("example.com", dns.TypeA))
+	if w.msg.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("rcode = %d, want SERVFAIL", w.msg.Rcode)
+	}
+	di, ok := ss.DomainInfo("example.com")
+	if !ok || di.Last == nil {
+		t.Fatalf("last answer = %+v", di)
+	}
+	if !di.Last.Timeout || di.Last.Error != "" {
+		t.Fatalf("last = %+v, want Timeout without error text", di.Last)
+	}
+	if len(di.Last.Attempts) != 1 {
+		t.Fatalf("attempts = %+v", di.Last.Attempts)
+	}
+	if a := di.Last.Attempts[0]; a.Status != "Timeout" || a.Error != "" {
+		t.Fatalf("attempt = %+v, want Timeout without error text", a)
+	}
+	// Для статистики апстримов таймаут по-прежнему считается неудачей.
+	groups := ss.UpstreamsPage()
+	if len(groups) != 1 || len(groups[0].Upstreams) != 1 || groups[0].Upstreams[0].Failed != 1 {
+		t.Fatalf("upstream failure not recorded: %+v", groups)
 	}
 }
 

@@ -57,6 +57,9 @@ type AnswerInfo struct {
 	FromCache  bool          `json:"from_cache"`
 	DurationMs float64       `json:"duration_ms,omitempty"` // время запроса через апстрим, мс
 	Attempts   []AttemptInfo `json:"attempts,omitempty"`    // цепочка попыток (только промах кэша)
+	// Timeout — ответ сформирован, потому что апстрим не успел ответить за
+	// отведённое время. Error при этом пуст: причина понятна из флага.
+	Timeout bool `json:"timeout,omitempty"`
 	// Blocked — ответ выдан блоклистом, а не апстримом; BlockedBy — сработавшая
 	// запись блоклиста.
 	Blocked   bool      `json:"blocked,omitempty"`

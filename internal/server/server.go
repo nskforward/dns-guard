@@ -215,7 +215,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	if res.err != nil {
 		s.log.Warn("upstream failed", "name", q.Name, "group", groupName, "err", res.err)
-		s.record(q.Name, groupName, false, errorInfo(q.Qtype, res.err.Error(), res.elapsed, res.attempts))
+		s.record(q.Name, groupName, false, errorInfo(q.Qtype, res.err, res.elapsed, res.attempts))
 		answer(w, r, dns.RcodeServerFailure)
 		return
 	}
@@ -326,15 +326,22 @@ func answerInfo(m *dns.Msg, qtype uint16, upstream string, fromCache bool, elaps
 	return info
 }
 
-// errorInfo описывает ответ, сформированный при ошибке апстрима.
-func errorInfo(qtype uint16, msg string, elapsed time.Duration, attempts []upstream.Attempt) *stats.AnswerInfo {
-	return &stats.AnswerInfo{
+// errorInfo описывает ответ, сформированный при ошибке апстрима. Для
+// таймаута вместо длинного текста ошибки выставляется Timeout — причина
+// понятна из Reason, а обёрнутый текст (URL, адреса) в карточке не нужен.
+func errorInfo(qtype uint16, err error, elapsed time.Duration, attempts []upstream.Attempt) *stats.AnswerInfo {
+	info := &stats.AnswerInfo{
 		Rcode:      "SERVFAIL",
 		Qtype:      typeName(qtype),
-		Error:      msg,
 		DurationMs: float64(elapsed) / float64(time.Millisecond),
 		Attempts:   attemptInfos(attempts),
 	}
+	if upstream.IsTimeout(err) {
+		info.Timeout = true
+	} else if err != nil {
+		info.Error = err.Error()
+	}
+	return info
 }
 
 // blockTTL — TTL фиктивных записей заблокированного домена.
@@ -387,10 +394,16 @@ func attemptInfos(attempts []upstream.Attempt) []stats.AttemptInfo {
 	}
 	out := make([]stats.AttemptInfo, 0, len(attempts))
 	for _, a := range attempts {
+		errText := a.Err
+		if a.Timeout {
+			// Таймаут отображается статусом Timeout; длинный текст ошибки
+			// (обёрнутый URL/сетевой адрес) в карточке не нужен.
+			errText = ""
+		}
 		out = append(out, stats.AttemptInfo{
 			Upstream:   a.Upstream,
 			Status:     attemptStatus(a),
-			Error:      a.Err,
+			Error:      errText,
 			DurationMs: float64(a.Elapsed) / float64(time.Millisecond),
 		})
 	}
@@ -399,6 +412,9 @@ func attemptInfos(attempts []upstream.Attempt) []stats.AttemptInfo {
 
 // attemptStatus возвращает человекочитаемый итог одной попытки.
 func attemptStatus(a upstream.Attempt) string {
+	if a.Timeout {
+		return "Timeout"
+	}
 	if a.Err != "" {
 		return "ERROR"
 	}
