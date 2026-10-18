@@ -71,6 +71,9 @@ func TestDomainsAPI(t *testing.T) {
 	if page.Total != 2 || page.Pages != 2 || page.Page != 1 || len(page.Items) != 1 {
 		t.Fatalf("page = %+v", page)
 	}
+	if page.Items[0].Status != "ok" {
+		t.Fatalf("status = %q, want ok", page.Items[0].Status)
+	}
 
 	// Детали домена с последним ответом.
 	rec = httptest.NewRecorder()

@@ -34,7 +34,11 @@ const (
 
 // DomainStat — статистика по полному доменному имени.
 type DomainStat struct {
-	Domain    string `json:"domain"`
+	Domain string `json:"domain"`
+	// Status — состояние последнего ответа домена: "ok" для успешного ответа,
+	// "servfail"/"nxdomain"/"nodata"/"blocked"/"bad" для проблемного, пусто —
+	// если ответов ещё не было.
+	Status    string `json:"status,omitempty"`
 	Total     uint64 `json:"total"`
 	CacheHits uint64 `json:"cache_hits"`
 	PeakRPM   uint64 `json:"peak_rpm"`
@@ -521,6 +525,11 @@ func (s *Stats) DomainsPage(page, size int, search string, blockedOnly bool, isB
 		st := statOf(name, d, mid)
 		st.Blocked = blocked
 		st.BlockedBy = entry
+		if blocked {
+			// Домен заблокирован прямо сейчас: статус важнее последнего
+			// сохранённого ответа, который мог быть успешным до блокировки.
+			st.Status = "blocked"
+		}
 		out = append(out, st)
 	}
 	s.mu.Unlock()
@@ -745,9 +754,49 @@ func statOf(name string, d *domain, mid int64) DomainStat {
 	}
 	return DomainStat{
 		Domain:    name,
+		Status:    statusOf(d.lastAnswer()),
 		Total:     d.total,
 		CacheHits: d.hits,
 		PeakRPM:   peak,
+	}
+}
+
+// lastAnswer возвращает самый свежий из сохранённых ответов домена:
+// успешный, негативный (NODATA/NXDOMAIN) или SERVFAIL.
+func (d *domain) lastAnswer() *AnswerInfo {
+	var last *AnswerInfo
+	pick := func(a *AnswerInfo) {
+		if a != nil && (last == nil || a.At.After(last.At)) {
+			last = a
+		}
+	}
+	for _, a := range d.answers {
+		pick(a)
+	}
+	for _, a := range d.negative {
+		pick(a)
+	}
+	pick(d.lastFail)
+	return last
+}
+
+// statusOf классифицирует последний ответ домена для колонки Status.
+func statusOf(a *AnswerInfo) string {
+	switch {
+	case a == nil:
+		return ""
+	case a.Blocked:
+		return "blocked"
+	case a.Rcode == "SERVFAIL":
+		return "servfail"
+	case a.Rcode == "NXDOMAIN":
+		return "nxdomain"
+	case a.successful():
+		return "ok"
+	case a.Rcode == "NOERROR":
+		return "nodata"
+	default:
+		return "bad"
 	}
 }
 

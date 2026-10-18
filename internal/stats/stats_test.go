@@ -682,3 +682,87 @@ func TestDomainsPageBlockedFilter(t *testing.T) {
 		t.Fatalf("filtered page = %+v", only)
 	}
 }
+
+// TestDomainStatus проверяет колонку Status: состояние последнего ответа
+// домена (успешный, негативный, SERVFAIL, блокировка) и приоритет блоклиста.
+func TestDomainStatus(t *testing.T) {
+	now := time.Unix(0, 0)
+	s := newWithClock(0, func() time.Time { return now })
+	status := func(name string) string {
+		page := s.DomainsPage(1, 0, name, false, nil)
+		if len(page.Items) != 1 {
+			t.Fatalf("status(%q): items = %+v", name, page.Items)
+		}
+		return page.Items[0].Status
+	}
+	answer := func(rcode string, records ...string) *AnswerInfo {
+		return &AnswerInfo{Rcode: rcode, Qtype: "A", Records: records}
+	}
+
+	// Ответов не было — статус пуст.
+	s.Record("none.test.", "g", false, nil)
+	if got := status("none.test"); got != "" {
+		t.Fatalf("no answer status = %q, want empty", got)
+	}
+
+	s.Record("ok.test.", "g", false, answer("NOERROR", "ok.test. 60 IN A 1.2.3.4"))
+	if got := status("ok.test"); got != "ok" {
+		t.Fatalf("ok status = %q", got)
+	}
+
+	s.Record("nx.test.", "g", false, answer("NXDOMAIN"))
+	if got := status("nx.test"); got != "nxdomain" {
+		t.Fatalf("nxdomain status = %q", got)
+	}
+
+	s.Record("nodata.test.", "g", false, answer("NOERROR"))
+	if got := status("nodata.test"); got != "nodata" {
+		t.Fatalf("nodata status = %q", got)
+	}
+
+	s.Record("fail.test.", "g", false, answer("SERVFAIL"))
+	if got := status("fail.test"); got != "servfail" {
+		t.Fatalf("servfail status = %q", got)
+	}
+
+	s.Record("blocked.test.", "g", false, &AnswerInfo{
+		Rcode:     "NOERROR",
+		Qtype:     "A",
+		Blocked:   true,
+		BlockedBy: "test",
+		Records:   []string{"blocked.test. 60 IN A 0.0.0.0"},
+	})
+	if got := status("blocked.test"); got != "blocked" {
+		t.Fatalf("blocked status = %q", got)
+	}
+
+	// Более свежий ответ перекрывает прежний: ok -> servfail -> ok.
+	now = time.Unix(10, 0)
+	s.Record("flip.test.", "g", false, answer("NOERROR", "flip.test. 60 IN A 1.1.1.1"))
+	if got := status("flip.test"); got != "ok" {
+		t.Fatalf("flip initial = %q", got)
+	}
+	now = time.Unix(20, 0)
+	s.Record("flip.test.", "g", true, answer("SERVFAIL"))
+	if got := status("flip.test"); got != "servfail" {
+		t.Fatalf("flip after servfail = %q", got)
+	}
+	now = time.Unix(30, 0)
+	s.Record("flip.test.", "g", false, answer("NOERROR", "flip.test. 60 IN A 2.2.2.2"))
+	if got := status("flip.test"); got != "ok" {
+		t.Fatalf("flip after recovery = %q", got)
+	}
+
+	// Домен, заблокированный сейчас, получает статус blocked даже если
+	// последний сохранённый ответ был успешным.
+	isBlocked := func(name string) (string, bool) {
+		if name == "ok.test" {
+			return "ok.test", true
+		}
+		return "", false
+	}
+	page := s.DomainsPage(1, 0, "ok.test", false, isBlocked)
+	if len(page.Items) != 1 || page.Items[0].Status != "blocked" {
+		t.Fatalf("current blocked status = %+v", page.Items)
+	}
+}
