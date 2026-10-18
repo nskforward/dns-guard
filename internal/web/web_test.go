@@ -364,3 +364,41 @@ func TestBlockAPI(t *testing.T) {
 		t.Fatalf("empty name status = %d, want 400", rec.Code)
 	}
 }
+
+// TestDomainsStatusFilterAPI проверяет фильтр status=bad в /api/domains:
+// в ответ попадают только домены с плохим последним ответом.
+func TestDomainsStatusFilterAPI(t *testing.T) {
+	st := stats.New(0)
+	st.Record("ok.test.", "g", false, &stats.AnswerInfo{
+		Rcode: "NOERROR", Qtype: "A", Records: []string{"ok.test. 60 IN A 1.2.3.4"},
+	})
+	st.Record("bad.test.", "g", false, &stats.AnswerInfo{Rcode: "REFUSED", Qtype: "A"})
+	h := New(Deps{
+		Stats:  st,
+		Config: func() *config.Config { return config.Default() },
+		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/domains?status=bad", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var page stats.DomainsPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].Domain != "bad.test" {
+		t.Fatalf("filtered page = %+v", page)
+	}
+
+	// Неизвестный статус не должен ничего находить.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/domains?status=nope", nil))
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if page.Total != 0 || len(page.Items) != 0 {
+		t.Fatalf("unknown status page = %+v", page)
+	}
+}

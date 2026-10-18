@@ -156,6 +156,7 @@ type Snapshot struct {
 	CacheMisses uint64            `json:"cache_misses"`
 	Servfail    uint64            `json:"servfail"`
 	Blocked     uint64            `json:"blocked"`
+	Bad         uint64            `json:"bad"`
 	Domains     int               `json:"domains"`
 	Groups      map[string]uint64 `json:"groups"`
 }
@@ -230,6 +231,7 @@ type Stats struct {
 	cacheMisses atomic.Uint64
 	servfail    atomic.Uint64
 	blocked     atomic.Uint64
+	bad         atomic.Uint64
 
 	mu             sync.Mutex
 	domains        map[string]*domain
@@ -287,6 +289,12 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 	failed := info != nil && info.Rcode == "SERVFAIL"
 	if failed {
 		s.servfail.Add(1)
+	}
+	// Bad — ответ с ошибкой, не являющийся SERVFAIL/NXDOMAIN/NODATA и не
+	// заблокированный (например, REFUSED или транспортная ошибка). Считается
+	// по всем выданным ответам, включая ответы из кэша.
+	if statusOf(info) == "bad" {
+		s.bad.Add(1)
 	}
 
 	name := normalize(qname)
@@ -495,7 +503,9 @@ func (s *Stats) UpstreamsPage() []GroupStat {
 //
 // isBlocked (может быть nil) проставляет в элементах Blocked/BlockedBy;
 // blockedOnly оставляет только домены, заблокированные согласно isBlocked.
-func (s *Stats) DomainsPage(page, size int, search string, blockedOnly bool, isBlocked func(string) (string, bool)) DomainsPage {
+// status (пустая строка — без фильтра) оставляет только домены с указанным
+// статусом последнего ответа: ok, servfail, nxdomain, nodata, blocked или bad.
+func (s *Stats) DomainsPage(page, size int, search string, blockedOnly bool, status string, isBlocked func(string) (string, bool)) DomainsPage {
 	if size <= 0 {
 		size = DefaultPageSize
 	}
@@ -529,6 +539,9 @@ func (s *Stats) DomainsPage(page, size int, search string, blockedOnly bool, isB
 			// Домен заблокирован прямо сейчас: статус важнее последнего
 			// сохранённого ответа, который мог быть успешным до блокировки.
 			st.Status = "blocked"
+		}
+		if status != "" && st.Status != status {
+			continue
 		}
 		out = append(out, st)
 	}
@@ -741,6 +754,7 @@ func (s *Stats) Snapshot() Snapshot {
 		CacheMisses: s.cacheMisses.Load(),
 		Servfail:    s.servfail.Load(),
 		Blocked:     s.blocked.Load(),
+		Bad:         s.bad.Load(),
 		Domains:     domains,
 		Groups:      groups,
 	}

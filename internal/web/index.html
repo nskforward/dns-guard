@@ -239,8 +239,8 @@
   <section id="view-dash">
     <div class="cards">
       <div class="card"><div class="k">Requests</div><div class="v" id="c-total">—</div></div>
+      <div class="card clickable" onclick="showBad()" title="Show only domains with bad status"><div class="k">Bad answers</div><div class="v" id="c-bad">—</div></div>
       <div class="card"><div class="k">Cache hits</div><div class="v" id="c-hits">—</div></div>
-      <div class="card"><div class="k">Misses</div><div class="v" id="c-misses">—</div></div>
       <div class="card"><div class="k">Hit rate</div><div class="v" id="c-rate">—</div></div>
       <div class="card clickable" onclick="showTab('sf')" title="Show SERVFAIL details"><div class="k">SERVFAIL</div><div class="v" id="c-servfail">—</div></div>
       <div class="card clickable" onclick="showBlocked()" title="Show only blocked domains"><div class="k">Blocked</div><div class="v" id="c-blocked">—</div></div>
@@ -255,6 +255,7 @@
     <div class="row search-row" style="margin-top:12px">
       <input type="search" id="search" placeholder="Search by domain (substring)" onkeydown="if (event.key === 'Enter') applySearch()" oninput="if (!this.value.trim() && search !== '') applySearch()">
       <button id="blocked-toggle" class="act secondary" onclick="toggleBlockedOnly()" title="Show only blocked domains">Blocked only</button>
+      <button id="bad-toggle" class="act secondary" onclick="toggleBadOnly()" title="Show only domains with bad status">Bad only</button>
       <span id="domains-total" class="muted"></span>
     </div>
     <div class="table-wrap">
@@ -337,6 +338,7 @@ let activeTab = 'dash';
 let page = 1;
 let search = '';
 let blockedOnly = false;
+let badOnly = false;
 let pages = 0;
 let sfPage = 1;
 let sfPages = 0;
@@ -414,7 +416,9 @@ async function loadStats() {
     const d = await r.json();
     document.getElementById('c-total').textContent = fmt(d.total);
     document.getElementById('c-hits').textContent = fmt(d.cache_hits);
-    document.getElementById('c-misses').textContent = fmt(d.cache_misses);
+    const bd = document.getElementById('c-bad');
+    bd.textContent = fmt(d.bad);
+    bd.classList.toggle('err', d.bad > 0);
     const rate = d.total ? Math.round(d.cache_hits * 100 / d.total) : 0;
     document.getElementById('c-rate').textContent = rate + '%';
     const sf = document.getElementById('c-servfail');
@@ -435,7 +439,8 @@ async function loadStats() {
 async function loadDomains() {
   try {
     const qs = '?page=' + page + '&limit=' + PAGE_SIZE + '&search=' + encodeURIComponent(search) +
-      (blockedOnly ? '&blocked=1' : '');
+      (blockedOnly ? '&blocked=1' : '') +
+      (badOnly ? '&status=bad' : '');
     const r = await fetch('/api/domains' + qs, {cache:'no-store'});
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
@@ -456,7 +461,9 @@ function renderRows(items) {
     const td = document.createElement('td');
     td.colSpan = 7;
     td.className = 'empty muted';
-    td.textContent = blockedOnly ? 'No blocked domains' : (search ? 'Nothing found' : 'No data yet');
+    td.textContent = blockedOnly ? 'No blocked domains'
+      : badOnly ? 'No domains with bad status'
+      : search ? 'Nothing found' : 'No data yet';
     tr.appendChild(td);
     body.appendChild(tr);
     return;
@@ -548,19 +555,34 @@ async function toggleBlock(x) {
   }
 }
 
-function setBlockedOnly(v) {
-  blockedOnly = v;
+// applyOnlyFilter — включает один из взаимоисключающих фильтров таблицы
+// («только заблокированные» или «только с плохим ответом»), обновляет
+// состояние кнопок и перезагружает список доменов.
+function applyOnlyFilter(blocked, bad) {
+  blockedOnly = blocked;
+  badOnly = bad;
   page = 1;
-  document.getElementById('blocked-toggle').classList.toggle('active', v);
+  document.getElementById('blocked-toggle').classList.toggle('active', blockedOnly);
+  document.getElementById('bad-toggle').classList.toggle('active', badOnly);
   if (activeTab !== 'dash') { showTab('dash'); return; }
   loadDomains();
 }
+
+function setBlockedOnly(v) { applyOnlyFilter(v, false); }
 
 function toggleBlockedOnly() { setBlockedOnly(!blockedOnly); }
 
 // showBlocked — клик по карточке Blocked: включает фильтр «только
 // заблокированные» и переходит на вкладку Stats.
 function showBlocked() { setBlockedOnly(true); }
+
+function setBadOnly(v) { applyOnlyFilter(false, v); }
+
+function toggleBadOnly() { setBadOnly(!badOnly); }
+
+// showBad — клик по карточке Bad answers: включает фильтр «только домены
+// с плохим последним ответом» (Status = Bad) и переходит на вкладку Stats.
+function showBad() { setBadOnly(true); }
 
 function renderPager(d) {
   document.getElementById('domains-total').textContent = d.total ? 'Total: ' + fmt(d.total) : '';

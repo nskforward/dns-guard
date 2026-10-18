@@ -55,7 +55,7 @@ func TestRecordCounters(t *testing.T) {
 	if snap.Domains != 3 {
 		t.Errorf("Domains = %d, want 3", snap.Domains)
 	}
-	page := s.DomainsPage(1, 0, "", false, nil)
+	page := s.DomainsPage(1, 0, "", false, "", nil)
 	if len(page.Items) != 3 || page.Items[0].Domain != "a.example.com" || page.Items[0].Total != 2 {
 		t.Fatalf("items = %+v", page.Items)
 	}
@@ -129,7 +129,7 @@ func TestUpstreamP90(t *testing.T) {
 func TestPeakRPMRollover(t *testing.T) {
 	now := time.Unix(0, 0)
 	s := newWithClock(0, func() time.Time { return now })
-	top := func() DomainStat { return s.DomainsPage(1, 0, "", false, nil).Items[0] }
+	top := func() DomainStat { return s.DomainsPage(1, 0, "", false, "", nil).Items[0] }
 
 	// Минута 0: 3 запроса.
 	for i := 0; i < 3; i++ {
@@ -168,7 +168,7 @@ func TestPeakRPMRollover(t *testing.T) {
 func TestDomainCacheHits(t *testing.T) {
 	now := time.Unix(0, 0)
 	s := newWithClock(0, func() time.Time { return now })
-	top := func() DomainStat { return s.DomainsPage(1, 0, "", false, nil).Items[0] }
+	top := func() DomainStat { return s.DomainsPage(1, 0, "", false, "", nil).Items[0] }
 
 	s.Record("a.example.com.", "g", true, nil)
 	s.Record("a.example.com.", "g", false, nil)
@@ -199,7 +199,7 @@ func TestDomainsPageSortPaginationAndClamp(t *testing.T) {
 		}
 	}
 
-	first := s.DomainsPage(1, 50, "", false, nil)
+	first := s.DomainsPage(1, 50, "", false, "", nil)
 	if first.Total != 120 || first.Pages != 3 || first.Page != 1 || first.Size != 50 {
 		t.Fatalf("page meta = %+v", first)
 	}
@@ -207,7 +207,7 @@ func TestDomainsPageSortPaginationAndClamp(t *testing.T) {
 		t.Fatalf("first item = %+v", first.Items[0])
 	}
 
-	last := s.DomainsPage(3, 50, "", false, nil)
+	last := s.DomainsPage(3, 50, "", false, "", nil)
 	if last.Page != 3 || len(last.Items) != 20 {
 		t.Fatalf("last page = %+v", last)
 	}
@@ -216,17 +216,17 @@ func TestDomainsPageSortPaginationAndClamp(t *testing.T) {
 	}
 
 	// Номер страницы за пределами — прижимается к последней.
-	clamped := s.DomainsPage(99, 50, "", false, nil)
+	clamped := s.DomainsPage(99, 50, "", false, "", nil)
 	if clamped.Page != 3 || len(clamped.Items) != 20 {
 		t.Fatalf("clamped = %+v", clamped)
 	}
 
 	// Некорректные page/size нормализуются.
-	norm := s.DomainsPage(-1, -5, "", false, nil)
+	norm := s.DomainsPage(-1, -5, "", false, "", nil)
 	if norm.Page != 1 || norm.Size != DefaultPageSize || len(norm.Items) != 50 {
 		t.Fatalf("normalized = %+v", norm)
 	}
-	big := s.DomainsPage(1, 10000, "", false, nil)
+	big := s.DomainsPage(1, 10000, "", false, "", nil)
 	if big.Size != MaxPageSize || big.Pages != 1 || len(big.Items) != 120 {
 		t.Fatalf("big size = %+v", big)
 	}
@@ -239,7 +239,7 @@ func TestDomainsPageSearch(t *testing.T) {
 	}
 
 	// Подстрока без учёта регистра: host1 -> host10..host19.
-	got := s.DomainsPage(1, 0, "HOST1", false, nil)
+	got := s.DomainsPage(1, 0, "HOST1", false, "", nil)
 	if got.Total != 10 || len(got.Items) != 10 {
 		t.Fatalf("search total = %d, items = %d, want 10", got.Total, len(got.Items))
 	}
@@ -250,12 +250,12 @@ func TestDomainsPageSearch(t *testing.T) {
 	}
 
 	// Точное имя также находится как подстрока.
-	exact := s.DomainsPage(1, 0, "host07.test", false, nil)
+	exact := s.DomainsPage(1, 0, "host07.test", false, "", nil)
 	if exact.Total != 1 || exact.Items[0].Domain != "host07.test" {
 		t.Fatalf("exact = %+v", exact)
 	}
 
-	empty := s.DomainsPage(1, 0, "missing", false, nil)
+	empty := s.DomainsPage(1, 0, "missing", false, "", nil)
 	if empty.Total != 0 || empty.Pages != 0 || len(empty.Items) != 0 {
 		t.Fatalf("empty = %+v", empty)
 	}
@@ -278,7 +278,7 @@ func TestMaxDomainsLimit(t *testing.T) {
 	if _, ok := s.DomainInfo("c.test"); ok {
 		t.Fatal("c.test must not be tracked over the limit")
 	}
-	page := s.DomainsPage(1, 0, "", false, nil)
+	page := s.DomainsPage(1, 0, "", false, "", nil)
 	if len(page.Items) != 2 || page.Items[0].Domain != "a.test" || page.Items[0].Total != 2 {
 		t.Fatalf("items = %+v", page.Items)
 	}
@@ -663,7 +663,7 @@ func TestDomainsPageBlockedFilter(t *testing.T) {
 		return "", false
 	}
 
-	all := s.DomainsPage(1, 0, "", false, isBlocked)
+	all := s.DomainsPage(1, 0, "", false, "", isBlocked)
 	if all.Total != 2 {
 		t.Fatalf("total = %d, want 2", all.Total)
 	}
@@ -677,7 +677,7 @@ func TestDomainsPageBlockedFilter(t *testing.T) {
 		}
 	}
 
-	only := s.DomainsPage(1, 0, "", true, isBlocked)
+	only := s.DomainsPage(1, 0, "", true, "", isBlocked)
 	if only.Total != 1 || len(only.Items) != 1 || only.Items[0].Domain != "a.example.com" {
 		t.Fatalf("filtered page = %+v", only)
 	}
@@ -689,7 +689,7 @@ func TestDomainStatus(t *testing.T) {
 	now := time.Unix(0, 0)
 	s := newWithClock(0, func() time.Time { return now })
 	status := func(name string) string {
-		page := s.DomainsPage(1, 0, name, false, nil)
+		page := s.DomainsPage(1, 0, name, false, "", nil)
 		if len(page.Items) != 1 {
 			t.Fatalf("status(%q): items = %+v", name, page.Items)
 		}
@@ -761,8 +761,76 @@ func TestDomainStatus(t *testing.T) {
 		}
 		return "", false
 	}
-	page := s.DomainsPage(1, 0, "ok.test", false, isBlocked)
+	page := s.DomainsPage(1, 0, "ok.test", false, "", isBlocked)
 	if len(page.Items) != 1 || page.Items[0].Status != "blocked" {
 		t.Fatalf("current blocked status = %+v", page.Items)
+	}
+}
+
+// TestDomainsPageStatusFilter проверяет фильтр по статусу последнего ответа:
+// status=bad оставляет только домены с плохим ответом, а текущая блокировка
+// (статус blocked) исключает домен из выборки.
+func TestDomainsPageStatusFilter(t *testing.T) {
+	s := New(0)
+	answer := func(rcode string, records ...string) *AnswerInfo {
+		return &AnswerInfo{Rcode: rcode, Qtype: "A", Records: records}
+	}
+	s.Record("ok.test.", "g", false, answer("NOERROR", "ok.test. 60 IN A 1.2.3.4"))
+	s.Record("bad.test.", "g", false, answer("REFUSED"))
+	s.Record("fail.test.", "g", false, answer("SERVFAIL"))
+	s.Record("blocked.test.", "g", false, answer("REFUSED"))
+	isBlocked := func(name string) (string, bool) {
+		if name == "blocked.test" {
+			return "blocked.test", true
+		}
+		return "", false
+	}
+
+	bad := s.DomainsPage(1, 0, "", false, "bad", isBlocked)
+	if bad.Total != 1 || len(bad.Items) != 1 || bad.Items[0].Domain != "bad.test" {
+		t.Fatalf("status=bad page = %+v", bad)
+	}
+
+	ok := s.DomainsPage(1, 0, "", false, "ok", isBlocked)
+	if ok.Total != 1 || len(ok.Items) != 1 || ok.Items[0].Domain != "ok.test" {
+		t.Fatalf("status=ok page = %+v", ok)
+	}
+
+	blocked := s.DomainsPage(1, 0, "", false, "blocked", isBlocked)
+	if blocked.Total != 1 || len(blocked.Items) != 1 || blocked.Items[0].Domain != "blocked.test" {
+		t.Fatalf("status=blocked page = %+v", blocked)
+	}
+}
+
+// TestSnapshotBadCounter проверяет счётчик bad-ответов: в него попадают только
+// ответы с ошибкой (не ok/servfail/nxdomain/nodata/blocked), включая ответы
+// из кэша.
+func TestSnapshotBadCounter(t *testing.T) {
+	s := New(0)
+	answer := func(rcode string, records ...string) *AnswerInfo {
+		return &AnswerInfo{Rcode: rcode, Qtype: "A", Records: records}
+	}
+	s.Record("ok.test.", "g", false, answer("NOERROR", "ok.test. 60 IN A 1.2.3.4"))
+	s.Record("nx.test.", "g", false, answer("NXDOMAIN"))
+	s.Record("nodata.test.", "g", false, answer("NOERROR"))
+	s.Record("fail.test.", "g", false, answer("SERVFAIL"))
+	s.Record("blocked.test.", "g", false, &AnswerInfo{
+		Rcode:   "NOERROR",
+		Qtype:   "A",
+		Blocked: true,
+		Records: []string{"blocked.test. 60 IN A 0.0.0.0"},
+	})
+	if got := s.Snapshot().Bad; got != 0 {
+		t.Fatalf("bad = %d, want 0", got)
+	}
+
+	s.Record("refused.test.", "g", false, answer("REFUSED"))
+	s.Record("refused.test.", "g", true, answer("REFUSED"))
+	if got := s.Snapshot().Bad; got != 2 {
+		t.Fatalf("bad = %d, want 2", got)
+	}
+	// Заблокированный ответ не должен учитываться как bad.
+	if got := s.Snapshot().Blocked; got != 1 {
+		t.Fatalf("blocked = %d, want 1", got)
 	}
 }

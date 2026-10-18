@@ -107,13 +107,15 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDomains отдаёт страницу списка доменов:
-// GET /api/domains?page=1&limit=50&search=строка&blocked=1
-// blocked=1 оставляет только заблокированные домены.
+// GET /api/domains?page=1&limit=50&search=строка&blocked=1&status=bad
+// blocked=1 оставляет только заблокированные домены; status фильтрует по
+// статусу последнего ответа (ok/servfail/nxdomain/nodata/blocked/bad).
 func (s *Server) handleDomains(w http.ResponseWriter, r *http.Request) {
 	page := queryInt(r, "page", 1)
 	size := queryInt(r, "limit", stats.DefaultPageSize)
 	search := r.URL.Query().Get("search")
 	blockedOnly := queryBool(r, "blocked")
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	var isBlocked func(string) (string, bool)
 	if bl := s.blocklist(); bl.Len() > 0 {
 		isBlocked = bl.Match
@@ -131,7 +133,7 @@ func (s *Server) handleDomains(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, stats.DomainsPage{Page: page, Size: size, Items: []stats.DomainStat{}})
 		return
 	}
-	writeJSON(w, http.StatusOK, s.deps.Stats.DomainsPage(page, size, search, blockedOnly, isBlocked))
+	writeJSON(w, http.StatusOK, s.deps.Stats.DomainsPage(page, size, search, blockedOnly, status, isBlocked))
 }
 
 // handleDomain отдаёт статистику домена и сведения о последнем ответе:
