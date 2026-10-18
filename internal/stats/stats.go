@@ -1,9 +1,10 @@
 // Package stats собирает статистику обработанных DNS-запросов: общие счётчики,
-// распределение по группам апстримов и по полным доменным именам с пиковым RPM.
-// Для каждого домена хранится информация о последнем выданном ответе.
+// распределение по группам апстримов и по парам (домен, тип запроса). Для
+// каждой пары хранится информация о последнем выданном ответе.
 //
-// Память на домен — O(1), фоновых горутин нет: смена минуты обрабатывается
-// лениво при записи/чтении. Число уникальных доменов ограничено maxDomains.
+// Память на домен — O(1) по числу типов запросов, фоновых горутин нет. Число
+// уникальных доменов ограничено maxDomains, число типов на домен —
+// maxAnswersPerDomain.
 package stats
 
 import (
@@ -24,22 +25,24 @@ const (
 	MaxPageSize = 500
 	// latencySamples — сколько последних длительностей апстрима хранить для p90.
 	latencySamples = 256
-	// maxAnswersPerDomain — сколько последних успешных ответов разных типов
+	// maxAnswersPerDomain — сколько типов запросов (и последних ответов по ним)
 	// хранить на домен (A/AAAA/HTTPS/...); защита от роста памяти при переборе
 	// qtype.
 	maxAnswersPerDomain = 8
 )
 
-// DomainStat — статистика по полному доменному имени.
+// DomainStat — строка таблицы статистики: одна пара (домен, тип запроса).
 type DomainStat struct {
 	Domain string `json:"domain"`
-	// Status — состояние хронологически последнего ответа домена: "ok" для
-	// успешного ответа, "servfail"/"nxdomain"/"nodata"/"blocked"/"bad" для
-	// проблемного, пусто — если ответов ещё не было.
+	// Type — тип запроса (A, AAAA, HTTPS, ...). Пусто, если запрос учтён без
+	// сведений о типе.
+	Type string `json:"type,omitempty"`
+	// Status — состояние хронологически последнего ответа на запросы этого
+	// типа: "ok" для успешного ответа, "servfail"/"nxdomain"/"nodata"/"blocked"/
+	// "bad" для проблемного, пусто — если ответов ещё не было.
 	Status    string `json:"status,omitempty"`
 	Total     uint64 `json:"total"`
 	CacheHits uint64 `json:"cache_hits"`
-	PeakRPM   uint64 `json:"peak_rpm"`
 	// Blocked — домен (или его родитель) в блоклисте. BlockedBy — запись
 	// блоклиста, которая сработала.
 	Blocked   bool   `json:"blocked"`
@@ -141,14 +144,19 @@ type DomainsPage struct {
 
 // domain — счётчики одного домена.
 type domain struct {
-	minute   int64                  // unix/60 минуты последней записи
-	count    uint64                 // запросов в текущей минуте
-	peak     uint64                 // максимум count за завершённые минуты
-	total    uint64                 // всего запросов
-	hits     uint64                 // ответов из кэша
+	total    uint64                 // всего запросов по домену (все типы)
+	hits     uint64                 // ответов из кэша по домену (все типы)
+	types    map[string]*typeStat   // счётчики и последний ответ по каждому qtype
 	answers  map[string]*AnswerInfo // последний успешный ответ по каждому qtype
 	negative map[string]*AnswerInfo // последний негативный (NODATA/NXDOMAIN) по qtype
 	last     *AnswerInfo            // последний выданный ответ любого типа
+}
+
+// typeStat — счётчики запросов одного типа к домену и последний ответ на них.
+type typeStat struct {
+	total uint64
+	hits  uint64
+	last  *AnswerInfo
 }
 
 // upstreamCounters — счётчики попыток одного апстрима.
@@ -271,7 +279,6 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 
 	name := normalize(qname)
 	at := s.now()
-	mid := at.Unix() / 60
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -291,17 +298,9 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 		if len(s.domains) >= s.maxDomains {
 			return
 		}
-		d = &domain{minute: mid}
+		d = &domain{}
 		s.domains[name] = d
 	}
-	if d.minute != mid {
-		if d.count > d.peak {
-			d.peak = d.count
-		}
-		d.count = 0
-		d.minute = mid
-	}
-	d.count++
 	d.total++
 	if hit {
 		d.hits++
@@ -314,8 +313,15 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 		if cp.FromCache && len(cp.Attempts) == 0 {
 			cp.Attempts = d.inheritAttempts(cp.Qtype)
 		}
-		// Последний ответ любого типа — источник Status в таблице доменов.
+		// Последний ответ любого типа — источник Status в карточке домена.
 		d.last = &cp
+		// Счётчики и последний ответ по типу запроса — источник строки таблицы.
+		ts := d.typeStat(cp.Qtype)
+		ts.total++
+		if hit {
+			ts.hits++
+		}
+		ts.last = &cp
 		if cp.Blocked {
 			// Заблокированный ответ сохраняется как ответ по типу: он
 			// вытесняет прежние положительные записи, чтобы в сводке домена
@@ -373,6 +379,38 @@ func (d *domain) storeNegative(info *AnswerInfo) {
 		evictOldest(d.negative)
 	}
 	d.negative[info.Qtype] = info
+}
+
+// typeStat возвращает счётчики типа запроса, создавая их при необходимости.
+// Число типов на домен ограничено maxAnswersPerDomain: при переполнении
+// вытесняется тип с самым старым последним ответом.
+func (d *domain) typeStat(qtype string) *typeStat {
+	if d.types == nil {
+		d.types = make(map[string]*typeStat)
+	}
+	if ts := d.types[qtype]; ts != nil {
+		return ts
+	}
+	if len(d.types) >= maxAnswersPerDomain {
+		var (
+			oldestKey string
+			oldest    time.Time
+			first     = true
+		)
+		for k, v := range d.types {
+			var at time.Time
+			if v.last != nil {
+				at = v.last.At
+			}
+			if first || at.Before(oldest) {
+				oldestKey, oldest, first = k, at, false
+			}
+		}
+		delete(d.types, oldestKey)
+	}
+	ts := &typeStat{}
+	d.types[qtype] = ts
+	return ts
 }
 
 // evictOldest вытесняет самый старый по времени ответ, если лимит типов на
@@ -470,16 +508,16 @@ func (s *Stats) UpstreamsPage() []GroupStat {
 	return out
 }
 
-// DomainsPage возвращает страницу доменов, отсортированных по общему числу
-// запросов. search — подстрока имени без учёта регистра (пустая — все домены).
-// page нумеруется с единицы; size по умолчанию DefaultPageSize и не больше
-// MaxPageSize. Текущая минута каждого домена финализируется на момент вызова.
+// DomainsPage возвращает страницу строк статистики: по одной строке на каждую
+// пару (домен, тип запроса), отсортированных по числу запросов. search —
+// подстрока имени без учёта регистра (пустая — все домены). page нумеруется с
+// единицы; size по умолчанию DefaultPageSize и не больше MaxPageSize.
 //
 // isBlocked (может быть nil) проставляет в элементах Blocked/BlockedBy;
-// blockedOnly оставляет только домены, заблокированные согласно isBlocked;
-// badOnly оставляет только домены с проблемным последним ответом
-// (bad/servfail/nxdomain/nodata), исключая ok, blocked и домены без ответов.
-// status (пустая строка — без фильтра) оставляет только домены с указанным
+// blockedOnly оставляет только строки заблокированных доменов;
+// badOnly оставляет только строки с проблемным последним ответом
+// (bad/servfail/nxdomain/nodata), исключая ok, blocked и строки без ответов.
+// status (пустая строка — без фильтра) оставляет только строки с указанным
 // статусом последнего ответа: ok, servfail, nxdomain, nodata, blocked или bad.
 func (s *Stats) DomainsPage(page, size int, search string, blockedOnly, badOnly bool, status string, isBlocked func(string) (string, bool)) DomainsPage {
 	if size <= 0 {
@@ -492,7 +530,6 @@ func (s *Stats) DomainsPage(page, size int, search string, blockedOnly, badOnly 
 		page = 1
 	}
 	query := strings.ToLower(strings.TrimSpace(search))
-	mid := s.now().Unix() / 60
 
 	s.mu.Lock()
 	out := make([]DomainStat, 0, len(s.domains))
@@ -508,21 +545,53 @@ func (s *Stats) DomainsPage(page, size int, search string, blockedOnly, badOnly 
 		if blockedOnly && !blocked {
 			continue
 		}
-		st := statOf(name, d, mid)
-		st.Blocked = blocked
-		st.BlockedBy = entry
-		if blocked {
-			// Домен заблокирован прямо сейчас: статус важнее последнего
-			// сохранённого ответа, который мог быть успешным до блокировки.
-			st.Status = "blocked"
-		}
-		if badOnly && !isBadStatus(st.Status) {
+		// Строки по типам запросов. Если ответы учтены без сведений о типе
+		// (info == nil), показываем одну строку без Type, чтобы домен не
+		// пропадал из таблицы.
+		if len(d.types) == 0 {
+			st := DomainStat{
+				Domain:    name,
+				Status:    statusOf(d.last),
+				Total:     d.total,
+				CacheHits: d.hits,
+				Blocked:   blocked,
+				BlockedBy: entry,
+			}
+			if blocked {
+				st.Status = "blocked"
+			}
+			if badOnly && !isBadStatus(st.Status) {
+				continue
+			}
+			if status != "" && st.Status != status {
+				continue
+			}
+			out = append(out, st)
 			continue
 		}
-		if status != "" && st.Status != status {
-			continue
+		for qtype, ts := range d.types {
+			st := DomainStat{
+				Domain:    name,
+				Type:      qtype,
+				Status:    statusOf(ts.last),
+				Total:     ts.total,
+				CacheHits: ts.hits,
+				Blocked:   blocked,
+				BlockedBy: entry,
+			}
+			if blocked {
+				// Домен заблокирован прямо сейчас: статус важнее последнего
+				// сохранённого ответа по типу.
+				st.Status = "blocked"
+			}
+			if badOnly && !isBadStatus(st.Status) {
+				continue
+			}
+			if status != "" && st.Status != status {
+				continue
+			}
+			out = append(out, st)
 		}
-		out = append(out, st)
 	}
 	s.mu.Unlock()
 
@@ -530,7 +599,10 @@ func (s *Stats) DomainsPage(page, size int, search string, blockedOnly, badOnly 
 		if out[i].Total != out[j].Total {
 			return out[i].Total > out[j].Total
 		}
-		return out[i].Domain < out[j].Domain
+		if out[i].Domain != out[j].Domain {
+			return out[i].Domain < out[j].Domain
+		}
+		return out[i].Type < out[j].Type
 	})
 
 	total := len(out)
@@ -559,7 +631,6 @@ func (s *Stats) DomainInfo(name string) (DomainInfo, bool) {
 	if key == "" {
 		return DomainInfo{}, false
 	}
-	mid := s.now().Unix() / 60
 
 	s.mu.Lock()
 	d, ok := s.domains[key]
@@ -567,7 +638,7 @@ func (s *Stats) DomainInfo(name string) (DomainInfo, bool) {
 		s.mu.Unlock()
 		return DomainInfo{}, false
 	}
-	info := DomainInfo{DomainStat: statOf(key, d, mid)}
+	info := DomainInfo{DomainStat: domainStat(key, d)}
 	if d.last != nil {
 		cp := cloneAnswer(d.last, d.last.At)
 		info.Last = &cp
@@ -676,18 +747,13 @@ func (s *Stats) Snapshot() Snapshot {
 	}
 }
 
-// statOf собирает DomainStat, финализируя текущую минуту на момент mid.
-func statOf(name string, d *domain, mid int64) DomainStat {
-	peak := d.peak
-	if d.minute != mid && d.count > peak {
-		peak = d.count
-	}
+// domainStat собирает сводную строку домена (без типа) для карточки деталей.
+func domainStat(name string, d *domain) DomainStat {
 	return DomainStat{
 		Domain:    name,
 		Status:    statusOf(d.last),
 		Total:     d.total,
 		CacheHits: d.hits,
-		PeakRPM:   peak,
 	}
 }
 

@@ -50,6 +50,7 @@
   tr.clickable:hover td, tr.group-row:hover td { background:rgba(79,156,249,.08); }
   tr.clickable:active td, tr.group-row:active td { background:rgba(79,156,249,.14); }
   td.domain { word-break:break-all; }
+  td.qtype { width:1%; white-space:nowrap; color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
   /* Last-answer status: green check / red cross */
   td.st { width:1%; text-align:center; white-space:nowrap; }
   td.st svg { width:18px; height:18px; vertical-align:middle; }
@@ -160,6 +161,8 @@
     tbody td.domain, tbody td.name { grid-column:1/-1; font-weight:600; word-break:break-all; padding-right:34px; }
     tbody td.blk { position:absolute; top:8px; right:8px; width:auto; }
     tbody td.num { display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
+    tbody td.qtype { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    tbody td.qtype::before { content:attr(data-label); color:var(--muted); font-size:12px; flex:none; }
     tbody td.st { display:flex; align-items:center; justify-content:space-between; gap:8px; }
     tbody td.st::before { content:attr(data-label); color:var(--muted); font-size:12px; flex:none; }
     tbody td.num::before, tbody td.kv::before, tbody td.wide::before { content:attr(data-label); color:var(--muted); font-size:12px; flex:none; }
@@ -249,7 +252,7 @@
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>#</th><th>Domain</th><th>Status</th><th class="num">Requests</th><th class="num">Cache Hits</th><th class="num">Peak RPM</th><th class="blk"></th></tr></thead>
+        <thead><tr><th>#</th><th>Domain</th><th>Type</th><th>Status</th><th class="num">Requests</th><th class="num">Cache Hits</th><th class="blk"></th></tr></thead>
         <tbody id="top"></tbody>
       </table>
     </div>
@@ -431,12 +434,13 @@ function renderRows(items) {
     tr.title = 'Show last answer';
     tr.innerHTML = '<td class="idx muted">' + ((page - 1) * PAGE_SIZE + i + 1) + '</td>' +
       '<td class="domain" data-label="Domain"></td>' +
+      '<td class="qtype" data-label="Type"></td>' +
       '<td class="st" data-label="Status"></td>' +
       '<td class="num" data-label="Requests">' + fmt(x.total) + '</td>' +
-      '<td class="num" data-label="Cache hits">' + fmt(x.cache_hits) + '</td>' +
-      '<td class="num" data-label="Peak RPM">' + fmt(x.peak_rpm) + '</td>';
+      '<td class="num" data-label="Cache hits">' + fmt(x.cache_hits) + '</td>';
     tr.children[1].textContent = x.domain;
-    tr.replaceChild(statusCell(x), tr.children[2]);
+    tr.children[2].textContent = x.type || '—';
+    tr.replaceChild(statusCell(x), tr.children[3]);
     tr.appendChild(blockCell(x));
     tr.addEventListener('click', () => showDomain(x.domain));
     body.appendChild(tr);
@@ -714,7 +718,7 @@ async function showDomain(name) {
 function renderDomain(d) {
   document.getElementById('m-title').textContent = d.domain;
   document.getElementById('m-meta').textContent =
-    'Requests: ' + fmt(d.total) + ' · Cache hits: ' + fmt(d.cache_hits) + ' · Peak RPM: ' + fmt(d.peak_rpm);
+    'Requests: ' + fmt(d.total) + ' · Cache hits: ' + fmt(d.cache_hits);
 
   const box = document.getElementById('m-last');
   box.innerHTML = '';

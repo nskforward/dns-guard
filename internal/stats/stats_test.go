@@ -126,45 +126,6 @@ func TestUpstreamP90(t *testing.T) {
 	}
 }
 
-func TestPeakRPMRollover(t *testing.T) {
-	now := time.Unix(0, 0)
-	s := newWithClock(0, func() time.Time { return now })
-	top := func() DomainStat { return s.DomainsPage(1, 0, "", false, false, "", nil).Items[0] }
-
-	// Минута 0: 3 запроса.
-	for i := 0; i < 3; i++ {
-		s.Record("a.example.com.", "g", false, nil)
-	}
-	if got := top(); got.PeakRPM != 0 {
-		t.Fatalf("minute 0: %+v", got)
-	}
-
-	// Минута 1: 1 запрос -> rollover, peak = 3.
-	now = time.Unix(60, 0)
-	s.Record("a.example.com.", "g", false, nil)
-	if got := top(); got.PeakRPM != 3 {
-		t.Fatalf("minute 1: %+v", got)
-	}
-
-	// Минута 2: 5 запросов -> peak остаётся 3.
-	now = time.Unix(120, 0)
-	for i := 0; i < 5; i++ {
-		s.Record("a.example.com.", "g", false, nil)
-	}
-	if got := top(); got.PeakRPM != 3 {
-		t.Fatalf("minute 2: %+v", got)
-	}
-
-	// Минута 3: без запросов -> финализация минуты 2, peak = 5.
-	now = time.Unix(180, 0)
-	if got := top(); got.PeakRPM != 5 {
-		t.Fatalf("minute 3: %+v", got)
-	}
-	if got := top(); got.PeakRPM != 5 {
-		t.Fatalf("minute 3 repeat: %+v", got)
-	}
-}
-
 func TestDomainCacheHits(t *testing.T) {
 	now := time.Unix(0, 0)
 	s := newWithClock(0, func() time.Time { return now })
@@ -182,11 +143,11 @@ func TestDomainCacheHits(t *testing.T) {
 		t.Fatalf("total = %d, want 3 (%+v)", got.Total, got)
 	}
 
-	// Хиты накапливаются между минутами и не сбрасываются при rollover.
+	// Хиты накапливаются со временем.
 	now = time.Unix(60, 0)
 	s.Record("a.example.com.", "g", true, nil)
 	if got := top(); got.CacheHits != 3 {
-		t.Fatalf("cache hits after rollover = %d, want 3 (%+v)", got.CacheHits, got)
+		t.Fatalf("cache hits later = %d, want 3 (%+v)", got.CacheHits, got)
 	}
 }
 
@@ -693,23 +654,28 @@ func TestDomainStatus(t *testing.T) {
 		t.Fatalf("flip after recovery = %q", got)
 	}
 
-	// Статус строится строго по хронологически последнему ответу, даже если
-	// это негативный ответ другого типа запроса.
+	// Разные типы запросов к одному домену — отдельные строки со своим
+	// статусом; последний ответ одного типа не меняет статус другого.
 	now = time.Unix(40, 0)
 	s.Record("multi.test.", "g", false, &AnswerInfo{
 		Rcode: "NOERROR", Qtype: "A", Records: []string{"multi.test. 60 IN A 1.1.1.1"},
 	})
 	now = time.Unix(50, 0)
 	s.Record("multi.test.", "g", false, &AnswerInfo{Rcode: "NOERROR", Qtype: "AAAA"})
-	if got := status("multi.test"); got != "nodata" {
-		t.Fatalf("cross-qtype status = %q, want nodata", got)
-	}
 	now = time.Unix(60, 0)
 	s.Record("multi.test.", "g", false, &AnswerInfo{
 		Rcode: "NOERROR", Qtype: "A", Records: []string{"multi.test. 60 IN A 2.2.2.2"},
 	})
-	if got := status("multi.test"); got != "ok" {
-		t.Fatalf("cross-qtype recovery = %q, want ok", got)
+	multi := s.DomainsPage(1, 0, "multi.test", false, false, "", nil)
+	if len(multi.Items) != 2 {
+		t.Fatalf("multi rows = %+v", multi.Items)
+	}
+	byType := map[string]string{}
+	for _, it := range multi.Items {
+		byType[it.Type] = it.Status
+	}
+	if byType["A"] != "ok" || byType["AAAA"] != "nodata" {
+		t.Fatalf("per-type status = %v, want A=ok AAAA=nodata", byType)
 	}
 
 	// Домен, заблокированный сейчас, получает статус blocked даже если
@@ -723,6 +689,49 @@ func TestDomainStatus(t *testing.T) {
 	page := s.DomainsPage(1, 0, "ok.test", false, false, "", isBlocked)
 	if len(page.Items) != 1 || page.Items[0].Status != "blocked" {
 		t.Fatalf("current blocked status = %+v", page.Items)
+	}
+}
+
+// TestDomainsPagePerType проверяет, что запросы разных типов к одному домену
+// дают отдельные строки со своими счётчиками и статусами, а карточка домена
+// остаётся сводной.
+func TestDomainsPagePerType(t *testing.T) {
+	s := New(0)
+	s.Record("mdm.example.com.", "g", false, &AnswerInfo{
+		Rcode: "NOERROR", Qtype: "A", Records: []string{"mdm.example.com. 60 IN A 84.252.150.8"},
+	})
+	s.Record("mdm.example.com.", "g", false, &AnswerInfo{
+		Rcode:     "NOERROR",
+		Qtype:     "HTTPS",
+		Authority: []string{"example.com. 60 IN SOA ns. hostmaster. 1 2 3 4 60"},
+	})
+	s.Record("mdm.example.com.", "g", true, &AnswerInfo{
+		Rcode: "NOERROR", Qtype: "A", Records: []string{"mdm.example.com. 60 IN A 84.252.150.8"},
+	})
+
+	page := s.DomainsPage(1, 0, "mdm.example.com", false, false, "", nil)
+	if page.Total != 2 || len(page.Items) != 2 {
+		t.Fatalf("page = %+v", page)
+	}
+	// Сортировка по числу запросов: A (2) выше HTTPS (1).
+	a, https := page.Items[0], page.Items[1]
+	if a.Type != "A" || a.Total != 2 || a.CacheHits != 1 || a.Status != "ok" {
+		t.Fatalf("A row = %+v", a)
+	}
+	if https.Type != "HTTPS" || https.Total != 1 || https.Status != "nodata" {
+		t.Fatalf("HTTPS row = %+v", https)
+	}
+
+	// Фильтры работают по строкам: bad оставляет только HTTPS.
+	bad := s.DomainsPage(1, 0, "mdm.example.com", false, true, "", nil)
+	if bad.Total != 1 || len(bad.Items) != 1 || bad.Items[0].Type != "HTTPS" {
+		t.Fatalf("bad page = %+v", bad)
+	}
+
+	// Карточка домена по-прежнему сводная: общий Total и склейка записей.
+	di, ok := s.DomainInfo("mdm.example.com")
+	if !ok || di.Total != 3 || di.Answer == nil || len(di.Answer.Records) != 1 {
+		t.Fatalf("domain info = %+v", di)
 	}
 }
 
