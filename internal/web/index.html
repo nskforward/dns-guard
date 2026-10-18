@@ -836,7 +836,8 @@ function renderDomain(d) {
     const card = document.createElement('div');
     card.className = 'answer-card';
     card.appendChild(renderMeta([
-      ['Status', 'BLOCKED', 'rcode-err'],
+      ['Status', 'Bad', 'rcode-err'],
+      ['Reason', 'BLOCKED', 'rcode-err'],
       ['Blocked by', d.blocked_by || d.domain],
     ]));
     box.appendChild(card);
@@ -852,6 +853,15 @@ function renderDomain(d) {
   negative.forEach(n => box.appendChild(renderNegative(n)));
 }
 
+// sourceLabel объединяет источник ответа и адрес апстрима в одно поле:
+// «blocklist» для блоклиста, «cache (origin)» для ответа из кэша и просто
+// адрес апстрима для свежего ответа.
+function sourceLabel(last, blocked) {
+  if (blocked) return 'blocklist';
+  if (last.from_cache) return last.upstream ? 'cache (' + last.upstream + ')' : 'cache';
+  return last.upstream || 'upstream';
+}
+
 function renderAnswer(last) {
   const card = document.createElement('div');
   card.className = 'answer-card';
@@ -860,11 +870,12 @@ function renderAnswer(last) {
   const blocked = !!last.blocked;
   const ok = last.rcode === 'NOERROR';
   const rows = [
-    ['Status', blocked ? 'BLOCKED' : (ok ? 'OK' : (last.rcode || '—')), blocked ? 'rcode-err' : (ok ? 'rcode-ok' : 'rcode-err')],
-    ['Source', blocked ? 'blocklist' : (last.from_cache ? 'cache' : 'upstream')],
+    ['Status', blocked || !ok ? 'Bad' : 'OK', blocked || !ok ? 'rcode-err' : 'rcode-ok'],
   ];
+  if (blocked) rows.push(['Reason', 'BLOCKED', 'rcode-err']);
+  else if (!ok) rows.push(['Reason', last.rcode || '—', 'rcode-err']);
+  rows.push(['Source', sourceLabel(last, blocked)]);
   if (blocked && last.blocked_by) rows.push(['Blocked by', last.blocked_by]);
-  if (last.upstream) rows.push(['Upstream', last.upstream]);
   if (!last.from_cache && last.duration_ms > 0) rows.push(['Duration', fmtDuration(last.duration_ms)]);
   rows.push(['Time', when]);
   card.appendChild(renderMeta(rows));
@@ -889,12 +900,13 @@ function renderNegative(last) {
 
   const when = fmtTime(last.at);
   const nodata = last.rcode === 'NOERROR';
+  const reason = nodata ? 'NODATA' : (last.rcode || '—');
   const rows = [
-    ['Status', nodata ? 'NODATA' : (last.rcode || '—'), nodata ? 'rcode-warn' : 'rcode-err'],
+    ['Status', 'Bad', 'rcode-err'],
+    ['Reason', reason, nodata ? 'rcode-warn' : 'rcode-err'],
     ['Type', last.qtype || '—'],
-    ['Source', last.from_cache ? 'cache' : 'upstream'],
+    ['Source', sourceLabel(last, false)],
   ];
-  if (last.upstream) rows.push(['Upstream', last.upstream]);
   if (!last.from_cache && last.duration_ms > 0) rows.push(['Duration', fmtDuration(last.duration_ms)]);
   rows.push(['Time', when]);
   card.appendChild(renderMeta(rows));
