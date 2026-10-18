@@ -101,9 +101,9 @@
   .answer-card .sub { color:var(--muted); margin-top:10px; }
   .attempt-list { margin-top:4px; font:12px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace; }
   .attempt { display:flex; gap:12px; align-items:baseline; }
-  .attempt .a-up { flex:1; word-break:break-all; }
-  .attempt .a-st { min-width:72px; text-align:right; }
-  .attempt .a-dur { min-width:56px; text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .attempt .a-up { flex:1 1 auto; min-width:0; word-break:break-all; }
+  .attempt .a-st { flex:0 1 auto; min-width:0; text-align:right; overflow-wrap:anywhere; }
+  .attempt .a-dur { flex:none; min-width:56px; text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }
   /* Compact upstream chain in the SERVFAIL events table */
   .attempt-chain { display:flex; flex-wrap:wrap; align-items:baseline; gap:2px 8px; font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
   .attempt-chain .chain-item { display:inline-flex; align-items:baseline; gap:6px; min-width:0; }
