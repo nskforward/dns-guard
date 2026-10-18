@@ -104,6 +104,12 @@
   .attempt .a-up { flex:1; word-break:break-all; }
   .attempt .a-st { min-width:72px; text-align:right; }
   .attempt .a-dur { min-width:56px; text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }
+  /* Compact upstream chain in the SERVFAIL events table */
+  .attempt-chain { display:flex; flex-wrap:wrap; align-items:baseline; gap:2px 8px; font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .attempt-chain .chain-item { display:inline-flex; align-items:baseline; gap:6px; min-width:0; }
+  .attempt-chain .chain-up { word-break:break-all; }
+  .attempt-chain .chain-st { font-size:11px; font-weight:600; flex:none; }
+  .attempt-chain .chain-sep { color:var(--muted); }
 
   /* Upstreams detail panel */
   tr.group-row { cursor:pointer; }
@@ -192,6 +198,7 @@
     .attempt .a-up { flex:1 1 100%; }
     .attempt .a-st { min-width:0; text-align:right; flex:1; }
     .attempt .a-dur { min-width:0; }
+    .attempt-chain { flex:1 1 100%; }
   }
 </style>
 </head>
@@ -272,7 +279,7 @@
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Time</th><th>Domain</th><th>Type</th><th>Group</th><th>Upstream</th><th>Source</th><th>Error</th></tr></thead>
+        <thead><tr><th>Time</th><th>Domain</th><th>Group</th><th>Source</th><th>Attempts</th><th>Error</th></tr></thead>
         <tbody id="sf-events"></tbody>
       </table>
     </div>
@@ -644,7 +651,7 @@ function renderServfailEvents(items) {
   if (!items.length) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 7;
+    td.colSpan = 6;
     td.className = 'empty muted';
     td.textContent = 'No events yet';
     tr.appendChild(td);
@@ -658,20 +665,55 @@ function renderServfailEvents(items) {
     tr.innerHTML =
       '<td class="when"></td>' +
       '<td class="domain" data-label="Domain"></td>' +
-      '<td class="kv" data-label="Type"></td>' +
       '<td class="kv" data-label="Group"></td>' +
-      '<td class="kv" data-label="Upstream"></td>' +
       '<td class="kv" data-label="Source"></td>' +
+      '<td class="wide" data-label="Attempts"></td>' +
       '<td class="wide" data-label="Error"></td>';
     tr.children[0].textContent = when;
     tr.children[1].textContent = e.domain || '—';
-    tr.children[2].textContent = e.qtype || '—';
-    tr.children[3].textContent = e.group || '—';
-    tr.children[4].textContent = e.upstream || '—';
-    tr.children[5].textContent = e.from_cache ? 'cache' : 'upstream';
-    tr.children[6].textContent = err;
+    tr.children[2].textContent = e.group || '—';
+    tr.children[3].textContent = e.from_cache ? 'cache' : 'upstream';
+    tr.children[4].appendChild(attemptChain(e.attempts));
+    tr.children[5].textContent = err;
     body.appendChild(tr);
   });
+}
+
+// attemptChain выводит компактную цепочку попыток обращения к апстримам:
+// адрес каждой попытки и её итог. Текст транспортной ошибки — в подсказке,
+// чтобы строка таблицы оставалась читаемой.
+function attemptChain(attempts) {
+  const wrap = document.createElement('span');
+  wrap.className = 'attempt-chain';
+  if (!attempts || !attempts.length) {
+    wrap.textContent = '—';
+    return wrap;
+  }
+  attempts.forEach((a, i) => {
+    if (i) {
+      const sep = document.createElement('span');
+      sep.className = 'chain-sep';
+      sep.textContent = '→';
+      wrap.appendChild(sep);
+    }
+    const item = document.createElement('span');
+    item.className = 'chain-item';
+    if (a.error) item.title = a.upstream + ': ' + a.error;
+    else if (a.duration_ms > 0) item.title = a.upstream + ' — ' + fmtDuration(a.duration_ms);
+    const up = document.createElement('span');
+    up.className = 'chain-up';
+    up.textContent = a.upstream;
+    const st = document.createElement('span');
+    st.className = 'chain-st';
+    st.textContent = a.status || 'ERROR';
+    if (a.error || a.status === 'ERROR' || a.status === 'SERVFAIL') st.classList.add('rcode-err');
+    else if (a.status === 'NODATA' || a.status === 'NXDOMAIN') st.classList.add('rcode-warn');
+    else if (a.status === 'OK') st.classList.add('rcode-ok');
+    item.appendChild(up);
+    item.appendChild(st);
+    wrap.appendChild(item);
+  });
+  return wrap;
 }
 
 function goSfPage(p) {

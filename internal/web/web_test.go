@@ -181,6 +181,10 @@ func TestServfailAPI(t *testing.T) {
 		Qtype:    "A",
 		Error:    "timeout",
 		Upstream: "1.1.1.1:53",
+		Attempts: []stats.AttemptInfo{
+			{Upstream: "https://doh.example/dns-query", Status: "ERROR", Error: "doh https://doh.example: timeout"},
+			{Upstream: "udp://1.1.1.1:53", Status: "SERVFAIL", DurationMs: 12},
+		},
 	})
 	st.Record("a.example.com.", "g1", true, &stats.AnswerInfo{
 		Rcode:     "SERVFAIL",
@@ -214,6 +218,11 @@ func TestServfailAPI(t *testing.T) {
 	}
 	if page.Recent[1].Error != "timeout" || page.Recent[1].Upstream != "1.1.1.1:53" {
 		t.Fatalf("recent[1] = %+v", page.Recent[1])
+	}
+	if a := page.Recent[1].Attempts; len(a) != 2 ||
+		a[0].Upstream != "https://doh.example/dns-query" || a[0].Status != "ERROR" ||
+		a[1].Upstream != "udp://1.1.1.1:53" || a[1].Status != "SERVFAIL" {
+		t.Fatalf("recent[1] attempts = %+v", a)
 	}
 
 	// Без сборщика статистики — пустой корректный ответ.

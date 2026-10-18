@@ -109,15 +109,19 @@ type GroupStat struct {
 
 // ServfailEvent — одно событие SERVFAIL: запрос, на который не удалось получить
 // ответ. Error заполнен при транспортной ошибке апстримов, Upstream — при
-// SERVFAIL, полученном от самого сервера или из кэша.
+// SERVFAIL, полученном от самого сервера или из кэша. Attempts — цепочка
+// попыток обращения к апстримам в порядке обхода: по ней видно, какая именно
+// попытка упала, а какая дала окончательный ответ (может быть пуста для ответа
+// из кэша).
 type ServfailEvent struct {
-	At        time.Time `json:"at"`
-	Domain    string    `json:"domain"`
-	Qtype     string    `json:"qtype"`
-	Group     string    `json:"group,omitempty"`
-	Upstream  string    `json:"upstream,omitempty"`
-	Error     string    `json:"error,omitempty"`
-	FromCache bool      `json:"from_cache"`
+	At        time.Time     `json:"at"`
+	Domain    string        `json:"domain"`
+	Qtype     string        `json:"qtype"`
+	Group     string        `json:"group,omitempty"`
+	Upstream  string        `json:"upstream,omitempty"`
+	Error     string        `json:"error,omitempty"`
+	Attempts  []AttemptInfo `json:"attempts,omitempty"`
+	FromCache bool          `json:"from_cache"`
 }
 
 // ServfailDomain — домен с числом SERVFAIL и сведениями о последней ошибке.
@@ -309,6 +313,7 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 			Group:     group,
 			Upstream:  info.Upstream,
 			Error:     info.Error,
+			Attempts:  append([]AttemptInfo(nil), info.Attempts...),
 			FromCache: info.FromCache,
 		})
 	}

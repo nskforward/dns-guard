@@ -278,6 +278,41 @@ func TestServeDNSServfailOnUpstreamError(t *testing.T) {
 	}
 }
 
+// TestServeDNSServfailEventAttemptChain проверяет, что событие SERVFAIL хранит
+// всю цепочку попыток: DoH-попытка, упавшая по транспорту, и UDP-fallback,
+// давший окончательный ответ. В журнале событий это позволяет увидеть реально
+// упавший сервер, а не только адрес последней отвечавшей попытки.
+func TestServeDNSServfailEventAttemptChain(t *testing.T) {
+	resp := new(dns.Msg)
+	resp.SetQuestion("example.com.", dns.TypeA)
+	resp.Response = true
+	resp.Rcode = dns.RcodeServerFailure
+	fa := &fakeExchanger{
+		resp: resp,
+		attempts: []upstream.Attempt{
+			{Upstream: "https://doh.example/dns-query", Err: "doh https://doh.example: context deadline exceeded", Elapsed: 2 * time.Second},
+			{Upstream: "udp://77.88.8.8:53", Rcode: dns.RcodeServerFailure, Elapsed: 10 * time.Millisecond},
+		},
+	}
+	ss := stats.New(0)
+	s := newTestServer(testState(fa, fa, 60), nil, ss)
+
+	w := &mockWriter{}
+	s.ServeDNS(w, query("example.com", dns.TypeA))
+	if w.msg.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("rcode = %d, want SERVFAIL", w.msg.Rcode)
+	}
+	rec := ss.ServfailPage(1, 0).Recent
+	if len(rec) != 1 {
+		t.Fatalf("events = %+v", rec)
+	}
+	if got := rec[0].Attempts; len(got) != 2 ||
+		got[0].Upstream != "https://doh.example/dns-query" || got[0].Status != "ERROR" ||
+		got[1].Upstream != "udp://77.88.8.8:53" || got[1].Status != "SERVFAIL" {
+		t.Fatalf("event attempts = %+v", got)
+	}
+}
+
 // TestServeDNSRecordsNoDataAttempts проверяет, что NODATA-ответ попадает в
 // сводку как негативный (Status NODATA) вместе с цепочкой пройденных апстримов.
 func TestServeDNSRecordsNoDataAttempts(t *testing.T) {

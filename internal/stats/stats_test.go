@@ -302,6 +302,10 @@ func TestServfailPage(t *testing.T) {
 		Qtype:    "A",
 		Error:    "timeout",
 		Upstream: "1.1.1.1:53",
+		Attempts: []AttemptInfo{
+			{Upstream: "https://doh.example/dns-query", Status: "ERROR", Error: "doh https://doh.example: timeout"},
+			{Upstream: "udp://1.1.1.1:53", Status: "SERVFAIL", DurationMs: 12},
+		},
 	})
 	now = time.Unix(1020, 0)
 	s.Record("a.test.", "g1", false, &AnswerInfo{
@@ -346,6 +350,22 @@ func TestServfailPage(t *testing.T) {
 	if got.Recent[2].Domain != "a.test" || got.Recent[2].Error != "timeout" ||
 		got.Recent[2].Upstream != "1.1.1.1:53" || !got.Recent[2].At.Equal(time.Unix(1010, 0)) {
 		t.Fatalf("recent[2] = %+v", got.Recent[2])
+	}
+	// Событие несёт всю цепочку попыток: по ней видно, какая попытка упала
+	// (DoH), а какая дала окончательный ответ.
+	if len(got.Recent[2].Attempts) != 2 ||
+		got.Recent[2].Attempts[0].Upstream != "https://doh.example/dns-query" ||
+		got.Recent[2].Attempts[0].Status != "ERROR" ||
+		got.Recent[2].Attempts[1].Upstream != "udp://1.1.1.1:53" ||
+		got.Recent[2].Attempts[1].Status != "SERVFAIL" {
+		t.Fatalf("recent[2] attempts = %+v", got.Recent[2].Attempts)
+	}
+	// Событие хранит копию цепочки, а не срез вызывающего кода.
+	info := &AnswerInfo{Rcode: "SERVFAIL", Qtype: "A", Attempts: []AttemptInfo{{Upstream: "x", Status: "ERROR"}}}
+	s.Record("copy.test.", "g1", false, info)
+	info.Attempts[0].Upstream = "mutated"
+	if ev := s.ServfailPage(1, 0).Recent; len(ev) == 0 || ev[0].Attempts[0].Upstream != "x" {
+		t.Fatalf("event attempts must be copied: %+v", ev)
 	}
 }
 
