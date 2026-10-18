@@ -54,7 +54,6 @@ func New(d Deps) *Server {
 	s.mux.HandleFunc("/api/domains", s.handleDomains)
 	s.mux.HandleFunc("/api/domain", s.handleDomain)
 	s.mux.HandleFunc("/api/upstreams", s.handleUpstreams)
-	s.mux.HandleFunc("/api/servfail", s.handleServfail)
 	s.mux.HandleFunc("/api/block", s.handleBlock)
 	s.mux.HandleFunc("/api/config", s.handleConfig)
 	s.mux.HandleFunc("/api/cache/flush", s.handleFlush)
@@ -107,14 +106,16 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDomains отдаёт страницу списка доменов:
-// GET /api/domains?page=1&limit=50&search=строка&blocked=1&status=bad
-// blocked=1 оставляет только заблокированные домены; status фильтрует по
-// статусу последнего ответа (ok/servfail/nxdomain/nodata/blocked/bad).
+// GET /api/domains?page=1&limit=50&search=строка&blocked=1&bad=1&status=bad
+// blocked=1 оставляет только заблокированные домены; bad=1 — только домены с
+// проблемным последним ответом (bad/servfail/nxdomain/nodata); status фильтрует
+// по точному статусу последнего ответа (ok/servfail/nxdomain/nodata/blocked/bad).
 func (s *Server) handleDomains(w http.ResponseWriter, r *http.Request) {
 	page := queryInt(r, "page", 1)
 	size := queryInt(r, "limit", stats.DefaultPageSize)
 	search := r.URL.Query().Get("search")
 	blockedOnly := queryBool(r, "blocked")
+	badOnly := queryBool(r, "bad")
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	var isBlocked func(string) (string, bool)
 	if bl := s.blocklist(); bl.Len() > 0 {
@@ -133,7 +134,7 @@ func (s *Server) handleDomains(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, stats.DomainsPage{Page: page, Size: size, Items: []stats.DomainStat{}})
 		return
 	}
-	writeJSON(w, http.StatusOK, s.deps.Stats.DomainsPage(page, size, search, blockedOnly, status, isBlocked))
+	writeJSON(w, http.StatusOK, s.deps.Stats.DomainsPage(page, size, search, blockedOnly, badOnly, status, isBlocked))
 }
 
 // handleDomain отдаёт статистику домена и сведения о последнем ответе:
@@ -244,33 +245,6 @@ func (s *Server) handleUpstreams(w http.ResponseWriter, r *http.Request) {
 		items = s.deps.Stats.UpstreamsPage()
 	}
 	writeJSON(w, http.StatusOK, map[string][]stats.GroupStat{"items": items})
-}
-
-// handleServfail отдаёт детали SERVFAIL: домены с последней ошибкой и журнал
-// последних событий:
-// GET /api/servfail?page=1&limit=50
-func (s *Server) handleServfail(w http.ResponseWriter, r *http.Request) {
-	page := queryInt(r, "page", 1)
-	size := queryInt(r, "limit", stats.DefaultPageSize)
-	if s.deps.Stats == nil {
-		if size <= 0 {
-			size = stats.DefaultPageSize
-		}
-		if size > stats.MaxPageSize {
-			size = stats.MaxPageSize
-		}
-		if page < 1 {
-			page = 1
-		}
-		writeJSON(w, http.StatusOK, stats.ServfailPage{
-			Page:    page,
-			Size:    size,
-			Domains: []stats.ServfailDomain{},
-			Recent:  []stats.ServfailEvent{},
-		})
-		return
-	}
-	writeJSON(w, http.StatusOK, s.deps.Stats.ServfailPage(page, size))
 }
 
 // queryInt разбирает целочисленный query-параметр, возвращая def при ошибке.

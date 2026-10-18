@@ -22,8 +22,6 @@ const (
 	DefaultPageSize = 50
 	// MaxPageSize — максимально допустимый размер страницы.
 	MaxPageSize = 500
-	// servfailEventsCap — сколько последних SERVFAIL-событий хранить в журнале.
-	servfailEventsCap = 100
 	// latencySamples — сколько последних длительностей апстрима хранить для p90.
 	latencySamples = 256
 	// maxAnswersPerDomain — сколько последних успешных ответов разных типов
@@ -35,9 +33,9 @@ const (
 // DomainStat — статистика по полному доменному имени.
 type DomainStat struct {
 	Domain string `json:"domain"`
-	// Status — состояние последнего ответа домена: "ok" для успешного ответа,
-	// "servfail"/"nxdomain"/"nodata"/"blocked"/"bad" для проблемного, пусто —
-	// если ответов ещё не было.
+	// Status — состояние хронологически последнего ответа домена: "ok" для
+	// успешного ответа, "servfail"/"nxdomain"/"nodata"/"blocked"/"bad" для
+	// проблемного, пусто — если ответов ещё не было.
 	Status    string `json:"status,omitempty"`
 	Total     uint64 `json:"total"`
 	CacheHits uint64 `json:"cache_hits"`
@@ -85,11 +83,14 @@ func (a *AnswerInfo) successful() bool {
 
 // DomainInfo — статистика домена и сводные сведения о том, что известно по
 // домену: все записи, склеенные из последних успешных ответов по каждому типу
-// запроса.
+// запроса, и последний выданный ответ.
 type DomainInfo struct {
 	DomainStat
 	Answer   *AnswerInfo  `json:"answer,omitempty"`   // склейка успешных ответов по qtype
 	Negative []AnswerInfo `json:"negative,omitempty"` // последние NODATA/NXDOMAIN по qtype, свежие сверху
+	// Last — последний выданный ответ любого типа (включая SERVFAIL). Именно
+	// по нему строится Status в таблице доменов.
+	Last *AnswerInfo `json:"last,omitempty"`
 }
 
 // UpstreamStat — счётчики попыток одного апстрима в группе.
@@ -109,43 +110,6 @@ type GroupStat struct {
 	CacheHits uint64         `json:"cache_hits"`
 	Failed    uint64         `json:"failed"`
 	Upstreams []UpstreamStat `json:"upstreams"`
-}
-
-// ServfailEvent — одно событие SERVFAIL: запрос, на который не удалось получить
-// ответ. Error заполнен при транспортной ошибке апстримов, Upstream — при
-// SERVFAIL, полученном от самого сервера или из кэша. Attempts — цепочка
-// попыток обращения к апстримам в порядке обхода: по ней видно, какая именно
-// попытка упала, а какая дала окончательный ответ (может быть пуста для ответа
-// из кэша).
-type ServfailEvent struct {
-	At        time.Time     `json:"at"`
-	Domain    string        `json:"domain"`
-	Qtype     string        `json:"qtype"`
-	Group     string        `json:"group,omitempty"`
-	Upstream  string        `json:"upstream,omitempty"`
-	Error     string        `json:"error,omitempty"`
-	Attempts  []AttemptInfo `json:"attempts,omitempty"`
-	FromCache bool          `json:"from_cache"`
-}
-
-// ServfailDomain — домен с числом SERVFAIL и сведениями о последней ошибке.
-type ServfailDomain struct {
-	Domain string      `json:"domain"`
-	Count  uint64      `json:"count"`
-	Last   *AnswerInfo `json:"last,omitempty"`
-}
-
-// ServfailPage — домены с SERVFAIL (после сортировки и пагинации) и журнал
-// последних событий. Total — общий счётчик SERVFAIL, DomainsTotal — число
-// доменов, у которых есть хотя бы один SERVFAIL.
-type ServfailPage struct {
-	Total        uint64           `json:"total"`
-	DomainsTotal int              `json:"domains_total"`
-	Page         int              `json:"page"`
-	Pages        int              `json:"pages"`
-	Size         int              `json:"size"`
-	Domains      []ServfailDomain `json:"domains"`
-	Recent       []ServfailEvent  `json:"recent"`
 }
 
 // Snapshot — снимок общих счётчиков на момент вызова.
@@ -177,10 +141,9 @@ type domain struct {
 	peak     uint64                 // максимум count за завершённые минуты
 	total    uint64                 // всего запросов
 	hits     uint64                 // ответов из кэша
-	servfail uint64                 // SERVFAIL-ответов
 	answers  map[string]*AnswerInfo // последний успешный ответ по каждому qtype
 	negative map[string]*AnswerInfo // последний негативный (NODATA/NXDOMAIN) по qtype
-	lastFail *AnswerInfo            // последний SERVFAIL-ответ
+	last     *AnswerInfo            // последний выданный ответ любого типа
 }
 
 // upstreamCounters — счётчики попыток одного апстрима.
@@ -233,12 +196,11 @@ type Stats struct {
 	blocked     atomic.Uint64
 	bad         atomic.Uint64
 
-	mu             sync.Mutex
-	domains        map[string]*domain
-	groups         map[string]uint64
-	groupHits      map[string]uint64
-	ups            map[string]map[string]*upstreamCounters
-	servfailEvents []ServfailEvent // кольцевой буфер, не больше servfailEventsCap
+	mu        sync.Mutex
+	domains   map[string]*domain
+	groups    map[string]uint64
+	groupHits map[string]uint64
+	ups       map[string]map[string]*upstreamCounters
 }
 
 // New создаёт сборщик статистики. maxDomains <= 0 означает DefaultMaxDomains.
@@ -312,27 +274,10 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 	if name == "" {
 		return
 	}
-	if failed {
-		// Журнал событий не зависит от лимита доменов: он ведётся и тогда,
-		// когда новые домены уже не попадают в таблицу.
-		if len(s.servfailEvents) >= servfailEventsCap {
-			s.servfailEvents = s.servfailEvents[1:]
-		}
-		s.servfailEvents = append(s.servfailEvents, ServfailEvent{
-			At:        at,
-			Domain:    name,
-			Qtype:     info.Qtype,
-			Group:     group,
-			Upstream:  info.Upstream,
-			Error:     info.Error,
-			Attempts:  append([]AttemptInfo(nil), info.Attempts...),
-			FromCache: info.FromCache,
-		})
-	}
 	d := s.domains[name]
 	if d == nil {
 		// Лимит достигнут: новые домены не учитываем, но общие счётчики
-		// (total/hits/misses/servfail/groups/events) уже обновлены выше.
+		// (total/hits/misses/servfail/groups) уже обновлены выше.
 		if len(s.domains) >= s.maxDomains {
 			return
 		}
@@ -353,6 +298,8 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 	}
 	if info != nil {
 		cp := cloneAnswer(info, at)
+		// Последний ответ любого типа — источник Status в таблице доменов.
+		d.last = &cp
 		if cp.Blocked {
 			// Заблокированный ответ сохраняется как ответ по типу: он
 			// вытесняет прежние положительные записи, чтобы в сводке домена
@@ -364,10 +311,6 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 			// NODATA (NOERROR без записей) и NXDOMAIN: успешные записи не
 			// трогаем, но запоминаем последний негативный ответ по типу.
 			d.storeNegative(&cp)
-		}
-		if failed {
-			d.servfail++
-			d.lastFail = &cp
 		}
 	}
 }
@@ -502,10 +445,12 @@ func (s *Stats) UpstreamsPage() []GroupStat {
 // MaxPageSize. Текущая минута каждого домена финализируется на момент вызова.
 //
 // isBlocked (может быть nil) проставляет в элементах Blocked/BlockedBy;
-// blockedOnly оставляет только домены, заблокированные согласно isBlocked.
+// blockedOnly оставляет только домены, заблокированные согласно isBlocked;
+// badOnly оставляет только домены с проблемным последним ответом
+// (bad/servfail/nxdomain/nodata), исключая ok, blocked и домены без ответов.
 // status (пустая строка — без фильтра) оставляет только домены с указанным
 // статусом последнего ответа: ok, servfail, nxdomain, nodata, blocked или bad.
-func (s *Stats) DomainsPage(page, size int, search string, blockedOnly bool, status string, isBlocked func(string) (string, bool)) DomainsPage {
+func (s *Stats) DomainsPage(page, size int, search string, blockedOnly, badOnly bool, status string, isBlocked func(string) (string, bool)) DomainsPage {
 	if size <= 0 {
 		size = DefaultPageSize
 	}
@@ -539,6 +484,9 @@ func (s *Stats) DomainsPage(page, size int, search string, blockedOnly bool, sta
 			// Домен заблокирован прямо сейчас: статус важнее последнего
 			// сохранённого ответа, который мог быть успешным до блокировки.
 			st.Status = "blocked"
+		}
+		if badOnly && !isBadStatus(st.Status) {
+			continue
 		}
 		if status != "" && st.Status != status {
 			continue
@@ -589,6 +537,10 @@ func (s *Stats) DomainInfo(name string) (DomainInfo, bool) {
 		return DomainInfo{}, false
 	}
 	info := DomainInfo{DomainStat: statOf(key, d, mid)}
+	if d.last != nil {
+		cp := cloneAnswer(d.last, d.last.At)
+		info.Last = &cp
+	}
 	if len(d.answers) > 0 {
 		a := mergedAnswer(d.answers)
 		info.Answer = &a
@@ -655,75 +607,6 @@ func mergeUnique(answers map[string]*AnswerInfo, pick func(*AnswerInfo) []string
 	return out
 }
 
-// ServfailPage возвращает домены с SERVFAIL, отсортированные по убыванию
-// счётчика, и журнал последних событий (новые сверху). page нумеруется с
-// единицы; size по умолчанию DefaultPageSize и не больше MaxPageSize.
-func (s *Stats) ServfailPage(page, size int) ServfailPage {
-	if size <= 0 {
-		size = DefaultPageSize
-	}
-	if size > MaxPageSize {
-		size = MaxPageSize
-	}
-	if page < 1 {
-		page = 1
-	}
-
-	s.mu.Lock()
-	items := make([]ServfailDomain, 0, len(s.domains))
-	for name, d := range s.domains {
-		if d.servfail == 0 {
-			continue
-		}
-		sd := ServfailDomain{Domain: name, Count: d.servfail}
-		if d.lastFail != nil {
-			cp := cloneAnswer(d.lastFail, d.lastFail.At)
-			sd.Last = &cp
-		}
-		items = append(items, sd)
-	}
-	recent := make([]ServfailEvent, 0, len(s.servfailEvents))
-	for i := len(s.servfailEvents) - 1; i >= 0; i-- {
-		recent = append(recent, s.servfailEvents[i])
-	}
-	s.mu.Unlock()
-
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].Count != items[j].Count {
-			return items[i].Count > items[j].Count
-		}
-		return items[i].Domain < items[j].Domain
-	})
-
-	total := len(items)
-	pages := 0
-	if total > 0 {
-		pages = (total + size - 1) / size
-		if page > pages {
-			page = pages
-		}
-	}
-	out := ServfailPage{
-		Total:        s.servfail.Load(),
-		DomainsTotal: total,
-		Page:         page,
-		Pages:        pages,
-		Size:         size,
-		Domains:      []ServfailDomain{},
-		Recent:       recent,
-	}
-	start := (page - 1) * size
-	if start >= total {
-		return out
-	}
-	end := start + size
-	if end > total {
-		end = total
-	}
-	out.Domains = items[start:end]
-	return out
-}
-
 // cloneAnswer делает глубокую копию AnswerInfo, подставляя at, если время не
 // задано.
 func cloneAnswer(info *AnswerInfo, at time.Time) AnswerInfo {
@@ -768,30 +651,22 @@ func statOf(name string, d *domain, mid int64) DomainStat {
 	}
 	return DomainStat{
 		Domain:    name,
-		Status:    statusOf(d.lastAnswer()),
+		Status:    statusOf(d.last),
 		Total:     d.total,
 		CacheHits: d.hits,
 		PeakRPM:   peak,
 	}
 }
 
-// lastAnswer возвращает самый свежий из сохранённых ответов домена:
-// успешный, негативный (NODATA/NXDOMAIN) или SERVFAIL.
-func (d *domain) lastAnswer() *AnswerInfo {
-	var last *AnswerInfo
-	pick := func(a *AnswerInfo) {
-		if a != nil && (last == nil || a.At.After(last.At)) {
-			last = a
-		}
+// isBadStatus сообщает, что статус последнего ответа считается проблемным:
+// ошибка, SERVFAIL, NXDOMAIN или NODATA. ok, blocked и пустой статус
+// проблемными не считаются.
+func isBadStatus(status string) bool {
+	switch status {
+	case "bad", "servfail", "nxdomain", "nodata":
+		return true
 	}
-	for _, a := range d.answers {
-		pick(a)
-	}
-	for _, a := range d.negative {
-		pick(a)
-	}
-	pick(d.lastFail)
-	return last
+	return false
 }
 
 // statusOf классифицирует последний ответ домена для колонки Status.

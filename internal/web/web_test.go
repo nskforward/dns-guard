@@ -75,6 +75,20 @@ func TestDomainsAPI(t *testing.T) {
 		t.Fatalf("status = %q, want ok", page.Items[0].Status)
 	}
 
+	// bad=1 оставляет только домены с проблемным последним ответом.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/domains?bad=1", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var badPage stats.DomainsPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &badPage); err != nil {
+		t.Fatalf("decode bad: %v", err)
+	}
+	if badPage.Total != 1 || len(badPage.Items) != 1 || badPage.Items[0].Domain != "c.example.com" {
+		t.Fatalf("bad page = %+v", badPage)
+	}
+
 	// Детали домена с последним ответом.
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/domain?name=a.example.com", nil))
@@ -90,6 +104,10 @@ func TestDomainsAPI(t *testing.T) {
 	}
 	if info.Answer == nil || info.Answer.Rcode != "NOERROR" || info.Answer.Upstream != "1.1.1.1:53" {
 		t.Fatalf("answer = %+v", info.Answer)
+	}
+	if info.Last == nil || info.Last.Rcode != "NOERROR" || info.Last.Qtype != "A" ||
+		info.Last.Upstream != "1.1.1.1:53" {
+		t.Fatalf("last = %+v", info.Last)
 	}
 
 	// Неизвестный домен.
@@ -133,6 +151,9 @@ func TestDomainNegativeAPI(t *testing.T) {
 	if len(info.Negative) != 1 {
 		t.Fatalf("negative = %+v", info.Negative)
 	}
+	if info.Last == nil || info.Last.Rcode != "NOERROR" || info.Last.Qtype != "AAAA" {
+		t.Fatalf("last = %+v", info.Last)
+	}
 	neg := info.Negative[0]
 	if neg.Qtype != "AAAA" || neg.Rcode != "NOERROR" || len(neg.Attempts) != 2 {
 		t.Fatalf("negative = %+v", neg)
@@ -174,72 +195,6 @@ func TestUpstreamsAPI(t *testing.T) {
 		if u.Upstream == "1.1.1.1:53" && u.P90Ms != 10 {
 			t.Fatalf("1.1.1.1 p90 = %v, want 10", u.P90Ms)
 		}
-	}
-}
-
-func TestServfailAPI(t *testing.T) {
-	st := stats.New(0)
-	st.Record("a.example.com.", "g1", false, &stats.AnswerInfo{
-		Rcode:    "SERVFAIL",
-		Qtype:    "A",
-		Error:    "timeout",
-		Upstream: "1.1.1.1:53",
-		Attempts: []stats.AttemptInfo{
-			{Upstream: "https://doh.example/dns-query", Status: "ERROR", Error: "doh https://doh.example: timeout"},
-			{Upstream: "udp://1.1.1.1:53", Status: "SERVFAIL", DurationMs: 12},
-		},
-	})
-	st.Record("a.example.com.", "g1", true, &stats.AnswerInfo{
-		Rcode:     "SERVFAIL",
-		Qtype:     "AAAA",
-		FromCache: true,
-	})
-	st.Record("b.example.com.", "g2", false, &stats.AnswerInfo{
-		Rcode: "NOERROR",
-		Qtype: "A",
-	})
-
-	h := New(Deps{Stats: st}).Handler()
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/servfail?page=1&limit=10", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	var page stats.ServfailPage
-	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if page.Total != 2 || page.DomainsTotal != 1 || len(page.Domains) != 1 {
-		t.Fatalf("page = %+v", page)
-	}
-	d := page.Domains[0]
-	if d.Domain != "a.example.com" || d.Count != 2 || d.Last == nil || !d.Last.FromCache {
-		t.Fatalf("domain = %+v", d)
-	}
-	if len(page.Recent) != 2 || page.Recent[0].Group != "g1" || !page.Recent[0].FromCache {
-		t.Fatalf("recent = %+v", page.Recent)
-	}
-	if page.Recent[1].Error != "timeout" || page.Recent[1].Upstream != "1.1.1.1:53" {
-		t.Fatalf("recent[1] = %+v", page.Recent[1])
-	}
-	if a := page.Recent[1].Attempts; len(a) != 2 ||
-		a[0].Upstream != "https://doh.example/dns-query" || a[0].Status != "ERROR" ||
-		a[1].Upstream != "udp://1.1.1.1:53" || a[1].Status != "SERVFAIL" {
-		t.Fatalf("recent[1] attempts = %+v", a)
-	}
-
-	// Без сборщика статистики — пустой корректный ответ.
-	rec = httptest.NewRecorder()
-	New(Deps{}).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/servfail", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("nil stats status = %d", rec.Code)
-	}
-	var empty stats.ServfailPage
-	if err := json.Unmarshal(rec.Body.Bytes(), &empty); err != nil {
-		t.Fatalf("decode empty: %v", err)
-	}
-	if empty.Page != 1 || empty.Size != stats.DefaultPageSize || len(empty.Domains) != 0 {
-		t.Fatalf("empty = %+v", empty)
 	}
 }
 

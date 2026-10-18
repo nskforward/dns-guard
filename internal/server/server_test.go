@@ -268,21 +268,21 @@ func TestServeDNSServfailOnUpstreamError(t *testing.T) {
 		groups[0].Upstreams[0].Failed != 1 || groups[0].Upstreams[0].Ok != 0 {
 		t.Fatalf("upstream failure not recorded: %+v", groups)
 	}
-	// Цепочка попыток сохраняется и для SERVFAIL.
-	page := ss.ServfailPage(1, 0)
-	if len(page.Domains) != 1 || page.Domains[0].Last == nil || len(page.Domains[0].Last.Attempts) != 1 {
-		t.Fatalf("servfail attempts not recorded: %+v", page.Domains)
+	// Цепочка попыток сохраняется и для SERVFAIL — в последнем ответе домена.
+	di, ok := ss.DomainInfo("example.com")
+	if !ok || di.Last == nil || len(di.Last.Attempts) != 1 {
+		t.Fatalf("servfail attempts not recorded: %+v", di)
 	}
-	if a := page.Domains[0].Last.Attempts[0]; a.Upstream != "fake" || a.Status != "ERROR" || a.Error != "boom" {
+	if a := di.Last.Attempts[0]; a.Upstream != "fake" || a.Status != "ERROR" || a.Error != "boom" {
 		t.Fatalf("attempt = %+v", a)
 	}
 }
 
-// TestServeDNSServfailEventAttemptChain проверяет, что событие SERVFAIL хранит
-// всю цепочку попыток: DoH-попытка, упавшая по транспорту, и UDP-fallback,
-// давший окончательный ответ. В журнале событий это позволяет увидеть реально
+// TestServeDNSServfailAttemptChain проверяет, что последний ответ домена хранит
+// всю цепочку попыток SERVFAIL: DoH-попытку, упавшую по транспорту, и
+// UDP-fallback, давший окончательный ответ. Так в деталях домена видно реально
 // упавший сервер, а не только адрес последней отвечавшей попытки.
-func TestServeDNSServfailEventAttemptChain(t *testing.T) {
+func TestServeDNSServfailAttemptChain(t *testing.T) {
 	resp := new(dns.Msg)
 	resp.SetQuestion("example.com.", dns.TypeA)
 	resp.Response = true
@@ -302,14 +302,14 @@ func TestServeDNSServfailEventAttemptChain(t *testing.T) {
 	if w.msg.Rcode != dns.RcodeServerFailure {
 		t.Fatalf("rcode = %d, want SERVFAIL", w.msg.Rcode)
 	}
-	rec := ss.ServfailPage(1, 0).Recent
-	if len(rec) != 1 {
-		t.Fatalf("events = %+v", rec)
+	di, ok := ss.DomainInfo("example.com")
+	if !ok || di.Last == nil {
+		t.Fatalf("last answer = %+v", di)
 	}
-	if got := rec[0].Attempts; len(got) != 2 ||
+	if got := di.Last.Attempts; len(got) != 2 ||
 		got[0].Upstream != "https://doh.example/dns-query" || got[0].Status != "ERROR" ||
 		got[1].Upstream != "udp://77.88.8.8:53" || got[1].Status != "SERVFAIL" {
-		t.Fatalf("event attempts = %+v", got)
+		t.Fatalf("attempts = %+v", got)
 	}
 }
 
