@@ -308,6 +308,12 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 	}
 	if info != nil {
 		cp := cloneAnswer(info, at)
+		// Ответ из кэша не несёт собственную цепочку попыток: она относится
+		// к запросу, которым кэш был наполнен. Наследуем её, чтобы в карточке
+		// последнего ответа цепочка была видна и при кэш-хите.
+		if cp.FromCache && len(cp.Attempts) == 0 {
+			cp.Attempts = d.inheritAttempts(cp.Qtype)
+		}
 		// Последний ответ любого типа — источник Status в таблице доменов.
 		d.last = &cp
 		if cp.Blocked {
@@ -323,6 +329,21 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 			d.storeNegative(&cp)
 		}
 	}
+}
+
+// inheritAttempts возвращает цепочку попыток, сохранённую для последнего
+// ответа того же qtype (промаха кэша), чтобы кэш-хит показывал, какими
+// серверами получен закэшированный ответ.
+func (d *domain) inheritAttempts(qtype string) []AttemptInfo {
+	for _, a := range []*AnswerInfo{d.answers[qtype], d.negative[qtype]} {
+		if a != nil && len(a.Attempts) > 0 {
+			return append([]AttemptInfo(nil), a.Attempts...)
+		}
+	}
+	if d.last != nil && d.last.Qtype == qtype && len(d.last.Attempts) > 0 {
+		return append([]AttemptInfo(nil), d.last.Attempts...)
+	}
+	return nil
 }
 
 // storeAnswer сохраняет последний успешный ответ по его qtype; негативные

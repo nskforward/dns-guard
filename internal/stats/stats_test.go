@@ -425,6 +425,45 @@ func TestDomainInfoLastCopiesAttempts(t *testing.T) {
 	}
 }
 
+// TestDomainInfoCacheHitInheritsAttempts проверяет, что ответ из кэша наследует
+// цепочку попыток запроса, которым кэш был наполнен: в карточке последнего
+// ответа цепочка видна и для кэш-хитов.
+func TestDomainInfoCacheHitInheritsAttempts(t *testing.T) {
+	s := New(0)
+	// Промах: основной NODATA, резерв подтвердил NODATA.
+	s.Record("gs-loc.test.", "g", false, &AnswerInfo{
+		Rcode: "NOERROR",
+		Qtype: "HTTPS",
+		Authority: []string{
+			"akadns.net. 600 IN SOA internal.akadns.net. hostmaster.akamai.com. 1 2 3 4 60",
+		},
+		Attempts: []AttemptInfo{
+			{Upstream: "https://primary/dns-query", Status: "NODATA", DurationMs: 150},
+			{Upstream: "udp://192.168.1.1:53", Status: "NODATA", DurationMs: 5},
+		},
+	})
+	// Тот же ответ пришёл из кэша — собственных попыток у него нет.
+	s.Record("gs-loc.test.", "g", true, &AnswerInfo{
+		Rcode: "NOERROR",
+		Qtype: "HTTPS",
+		Authority: []string{
+			"akadns.net. 600 IN SOA internal.akadns.net. hostmaster.akamai.com. 1 2 3 4 60",
+		},
+		FromCache: true,
+	})
+
+	di, ok := s.DomainInfo("gs-loc.test")
+	if !ok || di.Last == nil {
+		t.Fatalf("domain info = %+v", di)
+	}
+	got := di.Last.Attempts
+	if !di.Last.FromCache || len(got) != 2 ||
+		got[0].Upstream != "https://primary/dns-query" ||
+		got[1].Upstream != "udp://192.168.1.1:53" {
+		t.Fatalf("cache hit must inherit attempts: %+v", di.Last)
+	}
+}
+
 func TestDomainInfoNegative(t *testing.T) {
 	now := time.Unix(200, 0)
 	s := newWithClock(0, func() time.Time { return now })

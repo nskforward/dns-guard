@@ -152,9 +152,10 @@ func TestGroupNodataFromPrimaryFallsBack(t *testing.T) {
 	}
 }
 
-// TestGroupNodataEverywhereKeepsPrimary проверяет, что если и резерв ответил
-// NODATA, возвращается исходный NODATA основного сервера.
-func TestGroupNodataEverywhereKeepsPrimary(t *testing.T) {
+// TestGroupNodataEverywhereKeepsLast проверяет, что если и резерв ответил
+// NODATA, возвращается NODATA последнего сервера цепочки: в карточке и кэше
+// видно, что fallback отработал и подтвердил ответ.
+func TestGroupNodataEverywhereKeepsLast(t *testing.T) {
 	primary, _ := newDoHReplyServer(t, false)
 	fallback, _ := newDoHReplyServer(t, false)
 
@@ -171,10 +172,10 @@ func TestGroupNodataEverywhereKeepsPrimary(t *testing.T) {
 		t.Fatalf("exchange: %v", err)
 	}
 	if resp == nil || resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 0 || len(resp.Ns) != 1 {
-		t.Fatalf("resp = %+v, want primary NODATA", resp)
+		t.Fatalf("resp = %+v, want NODATA", resp)
 	}
-	if origin != primary.URL {
-		t.Fatalf("origin = %q, want primary %q", origin, primary.URL)
+	if origin != fallback.URL {
+		t.Fatalf("origin = %q, want fallback %q", origin, fallback.URL)
 	}
 	if len(attempts) != 2 {
 		t.Fatalf("attempts = %+v, want primary+fallback", attempts)
@@ -276,9 +277,9 @@ func TestGroupNxdomainFromPrimaryFallsBack(t *testing.T) {
 	}
 }
 
-// TestGroupNxdomainEverywhereKeepsPrimary проверяет, что если все серверы
-// ответили NXDOMAIN, клиенту возвращается исходный NXDOMAIN основного.
-func TestGroupNxdomainEverywhereKeepsPrimary(t *testing.T) {
+// TestGroupNxdomainEverywhereKeepsLast проверяет, что если все серверы
+// ответили NXDOMAIN, клиенту возвращается NXDOMAIN последнего сервера цепочки.
+func TestGroupNxdomainEverywhereKeepsLast(t *testing.T) {
 	primary, _ := newDoHRcodeServer(t, dns.RcodeNameError)
 	fallback, _ := newDoHRcodeServer(t, dns.RcodeNameError)
 
@@ -295,14 +296,44 @@ func TestGroupNxdomainEverywhereKeepsPrimary(t *testing.T) {
 		t.Fatalf("exchange: %v", err)
 	}
 	if resp == nil || resp.Rcode != dns.RcodeNameError {
-		t.Fatalf("resp = %+v, want primary NXDOMAIN", resp)
+		t.Fatalf("resp = %+v, want NXDOMAIN", resp)
 	}
-	if origin != primary.URL {
-		t.Fatalf("origin = %q, want primary %q", origin, primary.URL)
+	if origin != fallback.URL {
+		t.Fatalf("origin = %q, want fallback %q", origin, fallback.URL)
 	}
 	if len(attempts) != 2 ||
 		attempts[0].Rcode != dns.RcodeNameError || attempts[1].Rcode != dns.RcodeNameError {
 		t.Fatalf("attempts = %+v, want NXDOMAIN on both", attempts)
+	}
+}
+
+// TestGroupMixedNegativeKeepsPrimary проверяет, что негативные ответы с разными
+// кодами не подменяют друг друга: NODATA основного остаётся итоговым, даже
+// если резерв ответил NXDOMAIN.
+func TestGroupMixedNegativeKeepsPrimary(t *testing.T) {
+	primary, _ := newDoHReplyServer(t, false)
+	fallback, _ := newDoHRcodeServer(t, dns.RcodeNameError)
+
+	grp, err := NewGroup("g", dohGroup(primary, fallback), time.Second)
+	if err != nil {
+		t.Fatalf("new group: %v", err)
+	}
+	defer grp.Close()
+
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	resp, origin, attempts, err := grp.Exchange(context.Background(), q)
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if resp == nil || resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 0 {
+		t.Fatalf("resp = %+v, want primary NODATA", resp)
+	}
+	if origin != primary.URL {
+		t.Fatalf("origin = %q, want primary %q", origin, primary.URL)
+	}
+	if len(attempts) != 2 || !attempts[0].Nodata || attempts[1].Rcode != dns.RcodeNameError {
+		t.Fatalf("attempts = %+v", attempts)
 	}
 }
 
@@ -449,10 +480,10 @@ func TestGroupServfailNonAddressFallsBack(t *testing.T) {
 	}
 }
 
-// TestGroupServfailEverywhereKeepsPrimary проверяет, что если и резерв
-// ответил SERVFAIL, клиенту возвращается исходный SERVFAIL основного
-// сервера, а не ошибка канала.
-func TestGroupServfailEverywhereKeepsPrimary(t *testing.T) {
+// TestGroupServfailEverywhereKeepsLast проверяет, что если и резерв ответил
+// SERVFAIL, клиенту возвращается SERVFAIL последнего сервера цепочки, а не
+// ошибка канала.
+func TestGroupServfailEverywhereKeepsLast(t *testing.T) {
 	primary, _ := newDoHServfailServer(t)
 	fallback, _ := newDoHServfailServer(t)
 
@@ -469,10 +500,10 @@ func TestGroupServfailEverywhereKeepsPrimary(t *testing.T) {
 		t.Fatalf("exchange: %v", err)
 	}
 	if resp == nil || resp.Rcode != dns.RcodeServerFailure {
-		t.Fatalf("resp = %+v, want primary SERVFAIL", resp)
+		t.Fatalf("resp = %+v, want SERVFAIL", resp)
 	}
-	if origin != primary.URL {
-		t.Fatalf("origin = %q, want primary %q", origin, primary.URL)
+	if origin != fallback.URL {
+		t.Fatalf("origin = %q, want fallback %q", origin, fallback.URL)
 	}
 	if len(attempts) != 2 ||
 		attempts[0].Rcode != dns.RcodeServerFailure || attempts[1].Rcode != dns.RcodeServerFailure {
