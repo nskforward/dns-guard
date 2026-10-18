@@ -2,53 +2,80 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
 <title>dns-guard</title>
 <style>
   :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --fg:#e6e8ec; --muted:#8a93a5; --accent:#4f9cf9; --ok:#3fb950; --warn:#d29922; --err:#f85149; }
   * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
   body { margin:0; font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+  button, input, textarea { font-family:inherit; }
+
+  /* Header / navigation */
   header { display:flex; align-items:center; gap:16px; padding:12px 20px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:2; }
-  header h1 { font-size:16px; margin:0; font-weight:600; }
-  .version { color:var(--muted); font-size:12px; border:1px solid var(--line); border-radius:999px; padding:2px 8px; }
+  .brand { display:flex; align-items:center; gap:10px; min-width:0; }
+  header h1 { font-size:16px; margin:0; font-weight:600; white-space:nowrap; }
+  .version { color:var(--muted); font-size:12px; border:1px solid var(--line); border-radius:999px; padding:2px 8px; white-space:nowrap; }
   nav { display:flex; gap:6px; }
-  nav button { background:transparent; color:var(--muted); border:1px solid transparent; padding:6px 12px; border-radius:8px; cursor:pointer; font-size:14px; }
+  nav button { display:flex; align-items:center; justify-content:center; gap:6px; background:transparent; color:var(--muted); border:1px solid transparent; padding:6px 12px; border-radius:8px; cursor:pointer; font-size:14px; -webkit-tap-highlight-color:transparent; }
+  nav button:hover { color:var(--fg); }
   nav button.active { color:var(--fg); background:var(--panel); border-color:var(--line); }
+  .nav-icon { display:none; width:20px; height:20px; flex:none; }
+  .status { color:var(--muted); font-size:12px; margin-left:auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:320px; text-align:right; }
+
   main { padding:20px; max-width:1100px; margin:0 auto; }
   .cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; min-width:0; }
   .card .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
   .card .v { font-size:22px; font-weight:600; margin-top:6px; }
   .card .v.warn { color:var(--warn); }
-  .card.clickable { cursor:pointer; }
+  .card.clickable { cursor:pointer; -webkit-tap-highlight-color:transparent; }
   .card.clickable:hover { border-color:var(--accent); }
+  .card.clickable:active { border-color:var(--accent); }
   .card.clickable .k::after { content:" ↗"; color:var(--muted); }
-  table { width:100%; border-collapse:collapse; margin-top:20px; background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+
+  /* Tables */
+  .table-wrap { margin-top:20px; overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:10px; }
+  table { width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
   th,td { text-align:left; padding:8px 12px; border-bottom:1px solid var(--line); }
   th { color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
   td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; }
   tr:last-child td { border-bottom:none; }
-  tr.clickable { cursor:pointer; }
-  tr.clickable:hover td { background:rgba(79,156,249,.08); }
+  tr.clickable, tr.group-row { cursor:pointer; -webkit-tap-highlight-color:transparent; }
+  tr.clickable:hover td, tr.group-row:hover td { background:rgba(79,156,249,.08); }
+  tr.clickable:active td, tr.group-row:active td { background:rgba(79,156,249,.14); }
   td.domain { word-break:break-all; }
+
+  /* Controls */
   .row { display:flex; align-items:center; justify-content:space-between; margin-top:20px; gap:12px; flex-wrap:wrap; }
+  .hint { margin:8px 0 0; }
   .muted { color:var(--muted); }
-  button.act { background:var(--accent); color:#fff; border:none; padding:8px 16px; border-radius:8px; cursor:pointer; font-size:14px; }
+  button.act { background:var(--accent); color:#fff; border:none; padding:8px 16px; border-radius:8px; cursor:pointer; font-size:14px; -webkit-tap-highlight-color:transparent; }
   button.act.secondary { background:var(--panel); border:1px solid var(--line); color:var(--fg); }
-  input[type=search] { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px 12px; font-size:14px; min-width:400px; }
+  button.act:active { filter:brightness(.9); }
+  .search-row input[type=search] { flex:1 1 320px; max-width:560px; }
+  input[type=search] { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px 12px; font-size:14px; min-width:0; }
   input[type=search]:focus { outline:none; border-color:var(--accent); }
   .pager { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:12px; }
-  .pager button { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:6px 10px; cursor:pointer; font-size:13px; min-width:34px; }
+  .pager button { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:6px 10px; cursor:pointer; font-size:13px; min-width:34px; -webkit-tap-highlight-color:transparent; }
   .pager button.active { background:var(--accent); border-color:var(--accent); color:#fff; }
   .pager button:disabled { opacity:.45; cursor:default; }
-  textarea { width:100%; height:60vh; background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:10px; padding:14px; font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; resize:vertical; }
+  .pager .pi-short { display:none; }
+  textarea { width:100%; height:60vh; min-height:220px; background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:10px; padding:14px; font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; resize:vertical; }
   .msg { padding:8px 12px; border-radius:8px; margin-top:12px; display:none; }
   .msg.ok { display:block; background:rgba(63,185,80,.15); color:var(--ok); }
   .msg.err { display:block; background:rgba(248,81,73,.15); color:var(--err); white-space:pre-wrap; }
   .hide { display:none; }
+
+  /* Modal */
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; padding:20px; z-index:10; }
   .modal.hide { display:none; }
-  .modal-box { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; width:100%; max-width:820px; max-height:85vh; overflow:auto; }
+  .modal-box { background:var(--panel); border:1px solid var(--line); border-radius:12px; width:100%; max-width:820px; max-height:85vh; overflow:auto; overscroll-behavior:contain; }
+  .modal-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding:16px 18px 10px; }
+  .modal-head h3 { margin:0; font-size:16px; word-break:break-all; }
+  .modal-body { padding:0 18px 18px; }
+
   pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin:8px 0 0; overflow:auto; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; word-break:break-all; }
   .rcode-ok { color:var(--ok); }
   .rcode-warn { color:var(--warn); }
@@ -64,27 +91,120 @@
   .attempt .a-up { flex:1; word-break:break-all; }
   .attempt .a-st { min-width:72px; text-align:right; }
   .attempt .a-dur { min-width:56px; text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }
+
+  /* Upstreams detail panel */
   tr.group-row { cursor:pointer; }
-  tr.group-row:hover td { background:rgba(79,156,249,.08); }
   tr.detail > td { padding:0; background:var(--bg); }
   .detail table { margin:0; border:none; border-radius:0; background:transparent; }
   .detail th, .detail td { padding:6px 12px 6px 34px; border-bottom:1px solid var(--line); }
   .detail tr:last-child td { border-bottom:none; }
+  .detail-empty { padding:8px 12px 8px 34px; }
   .toggle { display:inline-block; width:14px; color:var(--muted); }
   .fail { color:var(--err); }
+
+  /* ---- Mobile layout ---- */
+  @media (max-width: 760px) {
+    header { gap:8px; padding:10px 16px; padding-top:calc(10px + env(safe-area-inset-top)); }
+    header h1 { font-size:15px; }
+    .version { font-size:11px; padding:1px 7px; }
+    .status { max-width:38vw; font-size:11px; }
+
+    /* Bottom tab bar */
+    nav { position:fixed; left:0; right:0; bottom:0; z-index:5; gap:0; background:var(--panel); border-top:1px solid var(--line); padding:6px 8px calc(6px + env(safe-area-inset-bottom)); }
+    nav button { flex:1; flex-direction:column; gap:3px; padding:6px 4px; font-size:11px; line-height:1.2; min-height:48px; border:none; color:var(--muted); }
+    nav button:hover { color:var(--muted); }
+    nav button.active { color:var(--accent); background:transparent; border:none; }
+    .nav-icon { display:block; width:20px; height:20px; }
+
+    main { padding:14px 16px calc(88px + env(safe-area-inset-bottom)); }
+
+    .cards { grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+    .card { padding:12px; }
+    .card .v { font-size:19px; margin-top:4px; }
+
+    .row { margin-top:16px; gap:10px; }
+    .search-row input[type=search] { flex:1 1 100%; max-width:none; font-size:16px; min-height:44px; }
+    .search-row { gap:6px; }
+    .search-row span { width:100%; text-align:right; }
+    textarea { font-size:16px; height:52vh; }
+
+    /* Tables become cards */
+    .table-wrap { margin-top:12px; overflow:visible; border-radius:0; }
+    table { display:block; background:transparent; border:none; border-radius:0; overflow:visible; }
+    thead { display:none; }
+    tbody { display:flex; flex-direction:column; gap:10px; }
+    tbody tr { display:grid; grid-template-columns:1fr 1fr; gap:4px 14px; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+    tbody td { display:block; border:none; padding:0; min-width:0; overflow-wrap:anywhere; }
+    tbody td.idx { display:none; }
+    tbody td.domain, tbody td.name { grid-column:1/-1; font-weight:600; word-break:break-all; }
+    tbody td.num { display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
+    tbody td.num::before, tbody td.kv::before, tbody td.wide::before { content:attr(data-label); color:var(--muted); font-size:12px; flex:none; }
+    tbody td.kv { display:flex; align-items:baseline; justify-content:space-between; gap:8px; font-size:13px; }
+    tbody td.wide { grid-column:1/-1; display:flex; align-items:baseline; gap:6px; }
+    tbody td.when { grid-column:1/-1; color:var(--muted); font-size:12px; }
+    tbody td.when.kv { display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
+    tbody td.empty { grid-column:1/-1; color:var(--muted); }
+    tr.clickable:active td, tr.group-row:active td { background:transparent; }
+    tbody tr.clickable:active, tbody tr.group-row:active { border-color:var(--accent); }
+
+    /* Expanded upstream group */
+    tbody tr.detail { margin-top:-6px; gap:0; padding:10px 14px 12px; background:var(--bg); border-top-left-radius:0; border-top-right-radius:0; }
+    tbody tr.detail > td { grid-column:1/-1; }
+    .detail table { display:block; }
+    .detail tbody { display:flex; flex-direction:column; gap:0; }
+    .detail tbody tr { display:grid; grid-template-columns:1fr 1fr; gap:4px 14px; padding:8px 0; background:transparent; border:none; border-bottom:1px dashed var(--line); border-radius:0; }
+    .detail tbody tr:last-child { border-bottom:none; }
+    .detail-empty { padding:4px 0; }
+    .detail td { padding:0; border:none; }
+    .detail th { padding:0 0 6px; }
+
+    /* Pager: only prev/next and short info */
+    .pager { gap:8px; }
+    .pager button { min-height:44px; min-width:44px; font-size:15px; }
+    .pager-num, .pager-gap { display:none; }
+    .pager .pi-long { display:none; }
+    .pager .pi-short { display:inline; }
+
+    /* Modal as a bottom sheet */
+    .modal { padding:0; align-items:flex-end; }
+    .modal-box { max-width:none; max-height:92vh; border-radius:16px 16px 0 0; border-bottom:none; }
+    .modal-head { position:sticky; top:0; z-index:1; background:var(--panel); padding:14px 16px; border-bottom:1px solid var(--line); }
+    .modal-head .act { min-height:44px; padding:10px 14px; }
+    .modal-body { padding:12px 16px calc(16px + env(safe-area-inset-bottom)); }
+
+    .meta-list { grid-template-columns:max-content minmax(0,1fr); gap:4px 12px; }
+    .attempt { flex-wrap:wrap; row-gap:2px; }
+    .attempt .a-up { flex:1 1 100%; }
+    .attempt .a-st { min-width:0; text-align:right; flex:1; }
+    .attempt .a-dur { min-width:0; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1>dns-guard</h1>
-  <span id="version" class="version" title="dns-guard version">dev</span>
+  <div class="brand">
+    <h1>dns-guard</h1>
+    <span id="version" class="version" title="dns-guard version">dev</span>
+  </div>
   <nav>
-    <button id="tab-dash" class="active" onclick="showTab('dash')">Stats</button>
-    <button id="tab-sf" onclick="showTab('sf')">SERVFAIL</button>
-    <button id="tab-up" onclick="showTab('up')">Upstreams</button>
-    <button id="tab-cfg" onclick="showTab('cfg')">Config</button>
+    <button id="tab-dash" class="active" onclick="showTab('dash')">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 20h18"/><path d="M6 20v-7"/><path d="M12 20V4"/><path d="M18 20v-5"/></svg>
+      <span>Stats</span>
+    </button>
+    <button id="tab-sf" onclick="showTab('sf')">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+      <span>SERVFAIL</span>
+    </button>
+    <button id="tab-up" onclick="showTab('up')">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01"/><path d="M7 16.5h.01"/></svg>
+      <span>Upstreams</span>
+    </button>
+    <button id="tab-cfg" onclick="showTab('cfg')">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/></svg>
+      <span>Config</span>
+    </button>
   </nav>
-  <span id="status" class="muted" style="margin-left:auto"></span>
+  <span id="status" class="status muted"></span>
 </header>
 <main>
   <section id="view-dash">
@@ -102,16 +222,16 @@
       <h3 style="margin:0">Domains</h3>
       <button class="act secondary" onclick="flushCache()">Flush cache</button>
     </div>
-    <div class="row" style="margin-top:12px">
-      <span>
-        <input type="search" id="search" placeholder="Search by domain (substring)" onkeydown="if (event.key === 'Enter') applySearch()" oninput="if (!this.value.trim() && search !== '') applySearch()">
-      </span>
+    <div class="row search-row" style="margin-top:12px">
+      <input type="search" id="search" placeholder="Search by domain (substring)" onkeydown="if (event.key === 'Enter') applySearch()" oninput="if (!this.value.trim() && search !== '') applySearch()">
       <span id="domains-total" class="muted"></span>
     </div>
-    <table>
-      <thead><tr><th>#</th><th>Domain</th><th class="num">Requests</th><th class="num">Cache Hits</th><th class="num">Peak RPM</th></tr></thead>
-      <tbody id="top"></tbody>
-    </table>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Domain</th><th class="num">Requests</th><th class="num">Cache Hits</th><th class="num">Peak RPM</th></tr></thead>
+        <tbody id="top"></tbody>
+      </table>
+    </div>
     <div id="pager" class="pager"></div>
   </section>
 
@@ -120,23 +240,25 @@
       <h3 style="margin:0">SERVFAIL by domain</h3>
       <span id="sf-total" class="muted"></span>
     </div>
-    <div class="row" style="margin-top:8px">
-      <span class="muted">Click a domain to see its last answer.</span>
+    <p class="hint muted">Click a domain to see its last answer.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Domain</th><th class="num">SERVFAIL</th><th class="num">Share</th><th>Last error</th><th>Last time</th></tr></thead>
+        <tbody id="sf-domains"></tbody>
+      </table>
     </div>
-    <table>
-      <thead><tr><th>#</th><th>Domain</th><th class="num">SERVFAIL</th><th class="num">Share</th><th>Last error</th><th>Last time</th></tr></thead>
-      <tbody id="sf-domains"></tbody>
-    </table>
     <div id="sf-pager" class="pager"></div>
 
     <div class="row">
       <h3 style="margin:0">Recent events</h3>
       <span id="sf-recent-total" class="muted"></span>
     </div>
-    <table>
-      <thead><tr><th>Time</th><th>Domain</th><th>Type</th><th>Group</th><th>Upstream</th><th>Source</th><th>Error</th></tr></thead>
-      <tbody id="sf-events"></tbody>
-    </table>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Time</th><th>Domain</th><th>Type</th><th>Group</th><th>Upstream</th><th>Source</th><th>Error</th></tr></thead>
+        <tbody id="sf-events"></tbody>
+      </table>
+    </div>
   </section>
 
   <section id="view-up" class="hide">
@@ -144,10 +266,12 @@
       <h3 style="margin:0">Upstreams</h3>
       <span class="muted">Click a group to see its upstream servers.</span>
     </div>
-    <table>
-      <thead><tr><th>Group</th><th class="num">Requests</th><th class="num">Cache hits</th><th class="num">Upstream OK</th><th class="num">Failed</th><th class="num">Share</th></tr></thead>
-      <tbody id="ups"></tbody>
-    </table>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Group</th><th class="num">Requests</th><th class="num">Cache hits</th><th class="num">Upstream OK</th><th class="num">Failed</th><th class="num">Share</th></tr></thead>
+        <tbody id="ups"></tbody>
+      </table>
+    </div>
   </section>
 
   <section id="view-cfg" class="hide">
@@ -165,12 +289,14 @@
 
 <div id="modal" class="modal hide" onclick="closeModal(event)">
   <div class="modal-box" onclick="event.stopPropagation()">
-    <div class="row" style="margin-top:0">
-      <h3 id="m-title" style="margin:0; word-break:break-all"></h3>
+    <div class="modal-head">
+      <h3 id="m-title"></h3>
       <button class="act secondary" onclick="closeModal()">Close</button>
     </div>
-    <div id="m-meta" class="muted" style="margin-top:8px"></div>
-    <div id="m-last" style="margin-top:12px"></div>
+    <div class="modal-body">
+      <div id="m-meta" class="muted"></div>
+      <div id="m-last"></div>
+    </div>
   </div>
 </div>
 
@@ -185,8 +311,11 @@ let sfPages = 0;
 let expandedGroups = new Set();
 const PAGE_SIZE = 50;
 
+const TABS = ['dash', 'sf', 'up', 'cfg'];
+
 function showTab(which) {
   activeTab = which;
+  if (location.hash !== '#' + which) history.replaceState(null, '', '#' + which);
   document.getElementById('view-dash').classList.toggle('hide', which !== 'dash');
   document.getElementById('view-sf').classList.toggle('hide', which !== 'sf');
   document.getElementById('view-up').classList.toggle('hide', which !== 'up');
@@ -206,6 +335,16 @@ function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
 function fmt(n) { return (n ?? 0).toLocaleString('en-US'); }
 function pct(part, total) { return total ? Math.round(part * 100 / total) + '%' : '—'; }
 function fmtDuration(ms) { return ms >= 1000 ? (ms / 1000).toFixed(2) + ' s' : ms.toFixed(1) + ' ms'; }
+
+// fmtTime — компактный формат даты/времени, чтобы строки влезали на мобильных.
+function fmtTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  const p = n => String(n).padStart(2, '0');
+  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+    p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
 
 function uptime(sec) {
   const d = Math.floor(sec/86400), h = Math.floor(sec%86400/3600), m = Math.floor(sec%3600/60), s = sec%60;
@@ -280,7 +419,7 @@ function renderRows(items) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
     td.colSpan = 5;
-    td.className = 'muted';
+    td.className = 'empty muted';
     td.textContent = search ? 'Nothing found' : 'No data yet';
     tr.appendChild(td);
     body.appendChild(tr);
@@ -290,11 +429,11 @@ function renderRows(items) {
     const tr = document.createElement('tr');
     tr.className = 'clickable';
     tr.title = 'Show last answer';
-    tr.innerHTML = '<td class="muted">' + ((page - 1) * PAGE_SIZE + i + 1) + '</td>' +
-      '<td class="domain"></td>' +
-      '<td class="num">' + fmt(x.total) + '</td>' +
-      '<td class="num">' + fmt(x.cache_hits) + '</td>' +
-      '<td class="num">' + fmt(x.peak_rpm) + '</td>';
+    tr.innerHTML = '<td class="idx muted">' + ((page - 1) * PAGE_SIZE + i + 1) + '</td>' +
+      '<td class="domain" data-label="Domain"></td>' +
+      '<td class="num" data-label="Requests">' + fmt(x.total) + '</td>' +
+      '<td class="num" data-label="Cache hits">' + fmt(x.cache_hits) + '</td>' +
+      '<td class="num" data-label="Peak RPM">' + fmt(x.peak_rpm) + '</td>';
     tr.children[1].textContent = x.domain;
     tr.addEventListener('click', () => showDomain(x.domain));
     body.appendChild(tr);
@@ -314,7 +453,8 @@ function buildPager(id, d, onGo) {
   const mk = (label, target, opts = {}) => {
     const b = document.createElement('button');
     b.textContent = label;
-    if (opts.active) b.className = 'active';
+    if (opts.cls) b.className = opts.cls;
+    if (opts.active) b.classList.add('active');
     if (opts.disabled) b.disabled = true;
     else b.addEventListener('click', () => onGo(target));
     pager.appendChild(b);
@@ -323,18 +463,18 @@ function buildPager(id, d, onGo) {
   pageNumbers(d.page, d.pages).forEach(p => {
     if (p === '…') {
       const s = document.createElement('span');
-      s.className = 'muted';
+      s.className = 'muted pager-gap';
       s.textContent = '…';
       pager.appendChild(s);
     } else {
-      mk(String(p), p, {active: p === d.page});
+      mk(String(p), p, {active: p === d.page, cls: 'pager-num'});
     }
   });
   mk('›', d.page + 1, {disabled: d.page >= d.pages});
   const info = document.createElement('span');
-  info.className = 'muted';
-  info.style.marginLeft = '8px';
-  info.textContent = 'Page ' + d.page + ' of ' + d.pages;
+  info.className = 'muted pager-info';
+  info.innerHTML = '<span class="pi-long">Page ' + d.page + ' of ' + d.pages + '</span>' +
+    '<span class="pi-short">' + d.page + ' / ' + d.pages + '</span>';
   pager.appendChild(info);
 }
 
@@ -394,7 +534,7 @@ function renderServfailDomains(items, total) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
     td.colSpan = 6;
-    td.className = 'muted';
+    td.className = 'empty muted';
     td.textContent = 'No SERVFAIL yet';
     tr.appendChild(td);
     body.appendChild(tr);
@@ -403,17 +543,17 @@ function renderServfailDomains(items, total) {
   items.forEach((x, i) => {
     const last = x.last || {};
     const reason = last.error || (last.upstream ? 'SERVFAIL from upstream' : '—');
-    const when = last.at ? new Date(last.at).toLocaleString('en-US') : '—';
+    const when = fmtTime(last.at);
     const tr = document.createElement('tr');
     tr.className = 'clickable';
     tr.title = 'Show last answer';
     tr.innerHTML =
-      '<td class="muted">' + ((sfPage - 1) * PAGE_SIZE + i + 1) + '</td>' +
-      '<td class="domain"></td>' +
-      '<td class="num">' + fmt(x.count) + '</td>' +
-      '<td class="num">' + pct(x.count, total) + '</td>' +
-      '<td class="domain"></td>' +
-      '<td class="muted"></td>';
+      '<td class="idx muted">' + ((sfPage - 1) * PAGE_SIZE + i + 1) + '</td>' +
+      '<td class="domain" data-label="Domain"></td>' +
+      '<td class="num" data-label="SERVFAIL">' + fmt(x.count) + '</td>' +
+      '<td class="num" data-label="Share">' + pct(x.count, total) + '</td>' +
+      '<td class="wide" data-label="Last error"></td>' +
+      '<td class="kv when" data-label="Last time"></td>';
     tr.children[1].textContent = x.domain;
     tr.children[4].textContent = reason;
     tr.children[5].textContent = when;
@@ -430,24 +570,24 @@ function renderServfailEvents(items) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
     td.colSpan = 7;
-    td.className = 'muted';
+    td.className = 'empty muted';
     td.textContent = 'No events yet';
     tr.appendChild(td);
     body.appendChild(tr);
     return;
   }
   items.forEach(e => {
-    const when = e.at ? new Date(e.at).toLocaleString('en-US') : '—';
+    const when = fmtTime(e.at);
     const err = e.error || (e.upstream ? 'SERVFAIL from upstream' : '—');
     const tr = document.createElement('tr');
     tr.innerHTML =
-      '<td class="muted"></td>' +
-      '<td class="domain"></td>' +
-      '<td></td>' +
-      '<td></td>' +
-      '<td class="domain"></td>' +
-      '<td></td>' +
-      '<td class="domain"></td>';
+      '<td class="when"></td>' +
+      '<td class="domain" data-label="Domain"></td>' +
+      '<td class="kv" data-label="Type"></td>' +
+      '<td class="kv" data-label="Group"></td>' +
+      '<td class="kv" data-label="Upstream"></td>' +
+      '<td class="kv" data-label="Source"></td>' +
+      '<td class="wide" data-label="Error"></td>';
     tr.children[0].textContent = when;
     tr.children[1].textContent = e.domain || '—';
     tr.children[2].textContent = e.qtype || '—';
@@ -483,7 +623,7 @@ function renderUpstreams(items) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
     td.colSpan = 6;
-    td.className = 'muted';
+    td.className = 'empty muted';
     td.textContent = 'No data yet';
     tr.appendChild(td);
     body.appendChild(tr);
@@ -502,12 +642,12 @@ function renderUpstreams(items) {
     tr.className = 'group-row';
     tr.title = expanded ? 'Collapse upstream servers' : 'Expand upstream servers';
     tr.innerHTML =
-      '<td><span class="toggle">' + (expanded ? '▾' : '▸') + '</span><b></b></td>' +
-      '<td class="num">' + fmt(g.total) + '</td>' +
-      '<td class="num">' + fmt(g.cache_hits) + '</td>' +
-      '<td class="num">' + fmt(ok) + '</td>' +
-      '<td class="num' + (failed ? ' fail' : '') + '">' + fmt(failed) + '</td>' +
-      '<td class="num">' + pct(g.total, grandTotal) + '</td>';
+      '<td class="name"><span class="toggle">' + (expanded ? '▾' : '▸') + '</span><b></b></td>' +
+      '<td class="num" data-label="Requests">' + fmt(g.total) + '</td>' +
+      '<td class="num" data-label="Cache hits">' + fmt(g.cache_hits) + '</td>' +
+      '<td class="num" data-label="Upstream OK">' + fmt(ok) + '</td>' +
+      '<td class="num' + (failed ? ' fail' : '') + '" data-label="Failed">' + fmt(failed) + '</td>' +
+      '<td class="num" data-label="Share">' + pct(g.total, grandTotal) + '</td>';
     tr.children[0].querySelector('b').textContent = g.name;
     tr.addEventListener('click', () => {
       if (expandedGroups.has(g.name)) expandedGroups.delete(g.name);
@@ -522,7 +662,7 @@ function renderUpstreams(items) {
       const dtd = document.createElement('td');
       dtd.colSpan = 6;
       if (!ups.length) {
-        dtd.innerHTML = '<div class="muted" style="padding:8px 12px 8px 34px">No upstream requests yet.</div>';
+        dtd.innerHTML = '<div class="muted detail-empty">No upstream requests yet.</div>';
       } else {
         const t = document.createElement('table');
         t.innerHTML = '<thead><tr><th>Upstream</th><th class="num">OK</th><th class="num">Failed</th><th class="num">p90</th><th class="num">Share</th></tr></thead>';
@@ -530,11 +670,11 @@ function renderUpstreams(items) {
         ups.forEach(u => {
           const r2 = document.createElement('tr');
           r2.innerHTML =
-            '<td></td>' +
-            '<td class="num">' + fmt(u.ok) + '</td>' +
-            '<td class="num' + (u.failed ? ' fail' : '') + '">' + fmt(u.failed) + '</td>' +
-            '<td class="num">' + (u.p90_ms > 0 ? fmtDuration(u.p90_ms) : '—') + '</td>' +
-            '<td class="num">' + pct(u.ok, ok) + '</td>';
+            '<td class="name"></td>' +
+            '<td class="num" data-label="OK">' + fmt(u.ok) + '</td>' +
+            '<td class="num' + (u.failed ? ' fail' : '') + '" data-label="Failed">' + fmt(u.failed) + '</td>' +
+            '<td class="num" data-label="p90">' + (u.p90_ms > 0 ? fmtDuration(u.p90_ms) : '—') + '</td>' +
+            '<td class="num" data-label="Share">' + pct(u.ok, ok) + '</td>';
           r2.children[0].textContent = u.upstream;
           tb.appendChild(r2);
         });
@@ -588,7 +728,7 @@ function renderAnswer(last) {
   const card = document.createElement('div');
   card.className = 'answer-card';
 
-  const when = last.at ? new Date(last.at).toLocaleString('en-US') : '—';
+  const when = fmtTime(last.at);
   const ok = last.rcode === 'NOERROR';
   const rows = [
     ['Status', ok ? 'OK' : (last.rcode || '—'), ok ? 'rcode-ok' : 'rcode-err'],
@@ -615,7 +755,7 @@ function renderNegative(last) {
   const card = document.createElement('div');
   card.className = 'answer-card';
 
-  const when = last.at ? new Date(last.at).toLocaleString('en-US') : '—';
+  const when = fmtTime(last.at);
   const nodata = last.rcode === 'NOERROR';
   const rows = [
     ['Status', nodata ? 'NODATA' : (last.rcode || '—'), nodata ? 'rcode-warn' : 'rcode-err'],
@@ -740,8 +880,11 @@ async function saveConfig() {
 }
 
 loadVersion();
-refresh();
-startTimer();
+showTab(TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'dash');
+window.addEventListener('hashchange', () => {
+  const which = location.hash.slice(1);
+  if (TABS.includes(which) && which !== activeTab) showTab(which);
+});
 </script>
 </body>
 </html>
