@@ -751,6 +751,25 @@ func TestSnapshotBadCounter(t *testing.T) {
 	if got := s.Snapshot().Bad; got != 0 {
 		t.Fatalf("bad = %d, want 0", got)
 	}
+	if got := s.Snapshot().Servfail; got != 1 {
+		t.Fatalf("servfail = %d, want 1", got)
+	}
+	if got := s.Snapshot().Nxdomain; got != 1 {
+		t.Fatalf("nxdomain = %d, want 1", got)
+	}
+	if got := s.Snapshot().Nodata; got != 1 {
+		t.Fatalf("nodata = %d, want 1", got)
+	}
+
+	// Ответы из кэша учитываются так же, как свежие.
+	s.Record("nx.test.", "g", true, answer("NXDOMAIN"))
+	s.Record("nodata.test.", "g", true, answer("NOERROR"))
+	if got := s.Snapshot().Nxdomain; got != 2 {
+		t.Fatalf("cached nxdomain = %d, want 2", got)
+	}
+	if got := s.Snapshot().Nodata; got != 2 {
+		t.Fatalf("cached nodata = %d, want 2", got)
+	}
 
 	s.Record("refused.test.", "g", false, answer("REFUSED"))
 	s.Record("refused.test.", "g", true, answer("REFUSED"))

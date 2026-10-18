@@ -121,6 +121,8 @@ type Snapshot struct {
 	Servfail    uint64            `json:"servfail"`
 	Blocked     uint64            `json:"blocked"`
 	Bad         uint64            `json:"bad"`
+	Nxdomain    uint64            `json:"nxdomain"`
+	Nodata      uint64            `json:"nodata"`
 	Domains     int               `json:"domains"`
 	Groups      map[string]uint64 `json:"groups"`
 }
@@ -195,6 +197,8 @@ type Stats struct {
 	servfail    atomic.Uint64
 	blocked     atomic.Uint64
 	bad         atomic.Uint64
+	nxdomain    atomic.Uint64
+	nodata      atomic.Uint64
 
 	mu        sync.Mutex
 	domains   map[string]*domain
@@ -248,14 +252,17 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 	default:
 		s.cacheMisses.Add(1)
 	}
-	failed := info != nil && info.Rcode == "SERVFAIL"
-	if failed {
+	// Проблемные ответы считаются по всем выданным ответам, включая ответы
+	// из кэша, чтобы карточка «Bad answers» в UI совпадала с фильтром bad=1.
+	status := statusOf(info)
+	switch status {
+	case "servfail":
 		s.servfail.Add(1)
-	}
-	// Bad — ответ с ошибкой, не являющийся SERVFAIL/NXDOMAIN/NODATA и не
-	// заблокированный (например, REFUSED или транспортная ошибка). Считается
-	// по всем выданным ответам, включая ответы из кэша.
-	if statusOf(info) == "bad" {
+	case "nxdomain":
+		s.nxdomain.Add(1)
+	case "nodata":
+		s.nodata.Add(1)
+	case "bad":
 		s.bad.Add(1)
 	}
 
@@ -307,7 +314,7 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 			d.storeAnswer(&cp)
 		} else if cp.successful() {
 			d.storeAnswer(&cp)
-		} else if !failed {
+		} else if status != "servfail" {
 			// NODATA (NOERROR без записей) и NXDOMAIN: успешные записи не
 			// трогаем, но запоминаем последний негативный ответ по типу.
 			d.storeNegative(&cp)
@@ -638,6 +645,8 @@ func (s *Stats) Snapshot() Snapshot {
 		Servfail:    s.servfail.Load(),
 		Blocked:     s.blocked.Load(),
 		Bad:         s.bad.Load(),
+		Nxdomain:    s.nxdomain.Load(),
+		Nodata:      s.nodata.Load(),
 		Domains:     domains,
 		Groups:      groups,
 	}

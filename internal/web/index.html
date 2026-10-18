@@ -373,9 +373,10 @@ async function loadStats() {
     const d = await r.json();
     document.getElementById('c-total').textContent = fmt(d.total);
     document.getElementById('c-hits').textContent = fmt(d.cache_hits);
-    // Bad answers — все плохие ответы: ошибки (bad) и SERVFAIL.
+    // Bad answers — все проблемные ответы: ошибки (bad), SERVFAIL, NXDOMAIN и
+    // NODATA. Совпадает с фильтром bad=1 и красным крестом в таблице доменов.
     const bd = document.getElementById('c-bad');
-    const badTotal = (d.bad || 0) + (d.servfail || 0);
+    const badTotal = (d.bad || 0) + (d.servfail || 0) + (d.nxdomain || 0) + (d.nodata || 0);
     bd.textContent = fmt(badTotal);
     bd.classList.toggle('err', badTotal > 0);
     const rate = d.total ? Math.round(d.cache_hits * 100 / d.total) : 0;
