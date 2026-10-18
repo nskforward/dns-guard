@@ -832,7 +832,10 @@ function renderDomain(d) {
   box.innerHTML = '';
   box.className = '';
   const negative = d.negative || [];
-  if (d.blocked) {
+  // Заблокированный ответ уже показан карточкой ответа (Status/Reason/Source/
+  // Blocked by), поэтому отдельную сводку о блокировке для него не выводим.
+  const blockedAnswer = !!(d.answer && d.answer.blocked);
+  if (d.blocked && !blockedAnswer) {
     const card = document.createElement('div');
     card.className = 'answer-card';
     card.appendChild(renderMeta([
