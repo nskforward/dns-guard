@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ type Config struct {
 	Stats        Stats            `yaml:"stats"`
 	Upstream     Upstream         `yaml:"upstream"`
 	ECS          ECS              `yaml:"ecs,omitempty"`
+	Block        Block            `yaml:"block,omitempty"`
 	Groups       map[string]Group `yaml:"groups"`
 	DefaultGroup string           `yaml:"default_group"`
 	Rules        []Rule           `yaml:"rules"`
@@ -71,6 +73,56 @@ type ECS struct {
 	Subnet string `yaml:"subnet,omitempty"`
 	// IPv6Subnet — публичный IPv6-префикс; нормализуется до /56.
 	IPv6Subnet string `yaml:"ipv6_subnet,omitempty"`
+}
+
+// Режимы ответа для заблокированных доменов.
+const (
+	// BlockModeNoData — пустой ответ NOERROR без записей.
+	BlockModeNoData = "nodata"
+	// BlockModeZero — фиктивный адрес 0.0.0.0 (A) или :: (AAAA).
+	BlockModeZero = "zero"
+)
+
+// Block — блокировка доменов и всех их поддоменов: запросы не уходят к
+// апстриму, а получают ответ, по которому невозможно установить соединение.
+type Block struct {
+	// Mode — nodata (по умолчанию) или zero. Пустое значение эквивалентно
+	// nodata, но не сериализуется в YAML, чтобы не засорять конфиг.
+	Mode string `yaml:"mode,omitempty"`
+	// Domains — заблокированные домены; поддомены блокируются автоматически.
+	Domains []string `yaml:"domains,omitempty"`
+}
+
+// ModeOrDefault возвращает режим блокировки, подставляя режим по умолчанию.
+func (b Block) ModeOrDefault() string {
+	if b.Mode == BlockModeZero {
+		return BlockModeZero
+	}
+	return BlockModeNoData
+}
+
+// NormalizeDomain приводит доменное имя к каноническому виду: нижний регистр,
+// без "*." и завершающей точки.
+func NormalizeDomain(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	name = strings.TrimSuffix(name, ".")
+	name = strings.TrimPrefix(name, "*.")
+	name = strings.TrimPrefix(name, ".")
+	return name
+}
+
+// validDomainName проверяет, что нормализованное имя пригодно для DNS-запроса:
+// непустое, разумной длины и без пробелов/служебных символов.
+func validDomainName(name string) bool {
+	if name == "" || len(name) > 253 {
+		return false
+	}
+	for _, r := range name {
+		if r <= ' ' || r == '/' || r == '\\' || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // ParseECSNet разбирает CIDR-подсеть и обрезает префикс до рекомендуемого
@@ -202,7 +254,7 @@ func Parse(data []byte) (*Config, error) {
 	if len(cfg.Groups) == 0 {
 		cfg.Groups = Default().Groups
 	}
-	cfg.normalize()
+	cfg.Normalize()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -211,7 +263,7 @@ func Parse(data []byte) (*Config, error) {
 
 // Save записывает конфигурацию в файл (атомарно).
 func (c *Config) Save(path string) error {
-	c.normalize()
+	c.Normalize()
 	if err := c.Validate(); err != nil {
 		return err
 	}
@@ -228,12 +280,42 @@ func (c *Config) Save(path string) error {
 
 // YAML возвращает сериализованную конфигурацию (для веб-интерфейса).
 func (c *Config) YAML() string {
-	c.normalize()
+	c.Normalize()
 	data, _ := yaml.Marshal(c)
 	return string(data)
 }
 
-func (c *Config) normalize() {
+// Clone возвращает глубокую копию конфигурации. Нужна для безопасного
+// read-modify-write при изменении блоклиста через API: исходный снимок,
+// который читает DNS-сервер, не должен меняться под ним.
+func (c *Config) Clone() *Config {
+	cp := *c
+	cp.Block.Domains = append([]string(nil), c.Block.Domains...)
+	cp.Rules = append([]Rule(nil), c.Rules...)
+	cp.Groups = make(map[string]Group, len(c.Groups))
+	for name, g := range c.Groups {
+		ng := g
+		ng.Primary = append([]string(nil), g.Primary...)
+		ng.Fallback = append([]string(nil), g.Fallback...)
+		ng.Bootstrap = append([]string(nil), g.Bootstrap...)
+		if g.Hosts != nil {
+			ng.Hosts = make(map[string]string, len(g.Hosts))
+			for h, ip := range g.Hosts {
+				ng.Hosts[h] = ip
+			}
+		}
+		if g.ECS != nil {
+			v := *g.ECS
+			ng.ECS = &v
+		}
+		cp.Groups[name] = ng
+	}
+	return &cp
+}
+
+// Normalize приводит конфигурацию к каноническому виду: заполняет значения по
+// умолчанию и нормализует имена (домены блоклиста, хосты, протоколы).
+func (c *Config) Normalize() {
 	if c.Listen.UDP == "" {
 		c.Listen.UDP = ":53"
 	}
@@ -250,6 +332,27 @@ func (c *Config) normalize() {
 	}
 	if c.Stats.MaxDomains <= 0 {
 		c.Stats.MaxDomains = 50000
+	}
+	c.Block.Mode = strings.ToLower(strings.TrimSpace(c.Block.Mode))
+	if len(c.Block.Domains) > 0 {
+		seen := make(map[string]struct{}, len(c.Block.Domains))
+		out := make([]string, 0, len(c.Block.Domains))
+		for _, d := range c.Block.Domains {
+			name := NormalizeDomain(d)
+			if name == "" {
+				// Пустая запись остаётся, чтобы Validate вернул ошибку, а не
+				// молча выбросил опечатку в конфиге.
+				out = append(out, name)
+				continue
+			}
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			out = append(out, name)
+		}
+		sort.Strings(out)
+		c.Block.Domains = out
 	}
 	if c.Groups == nil {
 		c.Groups = map[string]Group{}
@@ -312,11 +415,29 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("rule %d (zone %q): group %q not found", i, r.Zone, r.Group)
 		}
 	}
+	if err := c.validateBlock(); err != nil {
+		return err
+	}
 	if err := c.validateECS(); err != nil {
 		return err
 	}
 	if c.Cache.Enabled && c.Cache.MaxTTL > 0 && c.Cache.MinTTL > c.Cache.MaxTTL {
 		return fmt.Errorf("cache: min_ttl (%d) > max_ttl (%d)", c.Cache.MinTTL, c.Cache.MaxTTL)
+	}
+	return nil
+}
+
+// validateBlock проверяет настройки блокировки доменов.
+func (c *Config) validateBlock() error {
+	switch c.Block.Mode {
+	case "", BlockModeNoData, BlockModeZero:
+	default:
+		return fmt.Errorf("block.mode: unknown mode %q (want nodata|zero)", c.Block.Mode)
+	}
+	for _, d := range c.Block.Domains {
+		if !validDomainName(d) {
+			return fmt.Errorf("block.domains: invalid domain %q", d)
+		}
 	}
 	return nil
 }

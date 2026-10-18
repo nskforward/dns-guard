@@ -2,11 +2,17 @@ package web
 
 import (
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/nskforward/dns-guard/internal/config"
 	"github.com/nskforward/dns-guard/internal/stats"
 )
 
@@ -244,5 +250,105 @@ func TestStatsAPIWithoutTop(t *testing.T) {
 	}
 	if body["total"].(float64) != 1 {
 		t.Fatalf("total = %v", body["total"])
+	}
+}
+
+// TestBlockAPI проверяет блокировку/разблокировку домена через API: применение
+// конфига, сохранение в файл, флаги в списке доменов и фильтр blocked=1.
+func TestBlockAPI(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	cfg := config.Default()
+	st := stats.New(0)
+	st.Record("sub.ads.example.com.", "g", false, nil)
+	st.Record("other.net.", "g", false, nil)
+
+	var applied *config.Config
+	h := New(Deps{
+		Path:   path,
+		Stats:  st,
+		Config: func() *config.Config { return cfg },
+		Reload: func(c *config.Config) error { applied = c; cfg = c; return nil },
+		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}).Handler()
+
+	// PUT блокирует домен (имя нормализуется) и сохраняет конфиг.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/block?name=ADS.Example.COM.", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if applied == nil || len(applied.Block.Domains) != 1 || applied.Block.Domains[0] != "ads.example.com" {
+		t.Fatalf("applied blocklist = %+v", applied)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved config: %v", err)
+	}
+	if !strings.Contains(string(data), "ads.example.com") {
+		t.Fatalf("saved config has no block entry:\n%s", data)
+	}
+
+	// Список доменов: флаг блокировки ставится и для поддомена, фильтр оставляет
+	// только заблокированный.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/domains?blocked=1", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("domains status = %d", rec.Code)
+	}
+	var page stats.DomainsPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if page.Total != 1 || len(page.Items) != 1 {
+		t.Fatalf("filtered page = %+v", page)
+	}
+	if item := page.Items[0]; item.Domain != "sub.ads.example.com" || !item.Blocked || item.BlockedBy != "ads.example.com" {
+		t.Fatalf("item = %+v", item)
+	}
+
+	// Без фильтра оба домена, у незаблокированного blocked=false.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/domains", nil))
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode all: %v", err)
+	}
+	if page.Total != 2 {
+		t.Fatalf("total = %d, want 2", page.Total)
+	}
+
+	// Детали домена содержат блокировку и её источник.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/domain?name=sub.ads.example.com", nil))
+	var info stats.DomainInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
+		t.Fatalf("decode domain: %v", err)
+	}
+	if !info.Blocked || info.BlockedBy != "ads.example.com" {
+		t.Fatalf("domain info = %+v", info)
+	}
+
+	// DELETE снимает блокировку (повторный DELETE идемпотентен).
+	for i := 0; i < 2; i++ {
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/block?name=ads.example.com", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("DELETE status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	}
+	if applied == nil || len(applied.Block.Domains) != 0 {
+		t.Fatalf("blocklist after delete = %+v", applied)
+	}
+
+	// Ошибки: неподдерживаемый метод и пустое имя.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/block?name=example.com", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET status = %d, want 405", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/block", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty name status = %d, want 400", rec.Code)
 	}
 }

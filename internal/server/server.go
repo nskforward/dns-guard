@@ -43,6 +43,8 @@ type state struct {
 	maxTTL       uint32
 	ecs          config.ECS      // настройки EDNS Client Subnet
 	ecsOff       map[string]bool // группы с ECS, отключённым через override
+	block        *rules.Blocklist
+	blockMode    string // nodata | zero
 }
 
 // Server обслуживает DNS-запросы.
@@ -89,11 +91,22 @@ func (s *Server) Reload(cfg *config.Config) error {
 	if old != nil {
 		closeState(old)
 		// Ответы, полученные с прежней ECS-подсетью, для новой уже неверны.
-		if s.cache != nil && !sameECSConfig(old, nst) {
+		// Смена блоклиста — тоже: положительный ответ, закэшированный до
+		// блокировки, не должен обходить её до истечения TTL.
+		if s.cache != nil && (!sameECSConfig(old, nst) || !sameBlockConfig(old, nst)) {
 			s.cache.Flush()
 		}
 	}
 	return nil
+}
+
+// sameBlockConfig сообщает, одинаково ли поведение блоклиста у двух снимков.
+// Смена режима при пустом списке ни на что не влияет и кэш не сбрасывает.
+func sameBlockConfig(a, b *state) bool {
+	if !a.block.Equal(b.block) {
+		return false
+	}
+	return a.blockMode == b.blockMode || a.block.Len() == 0
 }
 
 // sameECSConfig сообщает, одинаковы ли настройки ECS у двух снимков.
@@ -147,6 +160,8 @@ func buildState(cfg *config.Config, timeout time.Duration, cacheEnabled bool) (*
 		maxTTL:       cfg.Cache.MaxTTL,
 		ecs:          cfg.ECS,
 		ecsOff:       ecsOff,
+		block:        rules.NewBlocklist(cfg.Block.Domains),
+		blockMode:    cfg.Block.ModeOrDefault(),
 	}, nil
 }
 
@@ -169,6 +184,14 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	q := r.Question[0]
+	// Блоклист проверяется до кэша: положительный ответ, полученный и
+	// закэшированный до блокировки, не должен её обходить. Смена блоклиста на
+	// лету дополнительно сбрасывает кэш (см. Reload).
+	if entry, ok := st.block.Match(q.Name); ok {
+		s.record(q.Name, "", false, blockedInfo(q.Qtype, entry))
+		writeReply(w, r, blockedReply(r, q, st.blockMode))
+		return
+	}
 	group, groupName := st.pick(q.Name)
 	do := hasDO(r)
 
@@ -311,6 +334,48 @@ func errorInfo(qtype uint16, msg string, elapsed time.Duration, attempts []upstr
 		Error:      msg,
 		DurationMs: float64(elapsed) / float64(time.Millisecond),
 		Attempts:   attemptInfos(attempts),
+	}
+}
+
+// blockTTL — TTL фиктивных записей заблокированного домена.
+const blockTTL = 60
+
+// blockedReply формирует ответ для заблокированного домена: пустой NOERROR
+// (режим nodata) либо A/AAAA с адресом 0.0.0.0 / :: (режим zero), по которому
+// невозможно установить соединение. Для остальных типов запросов в обоих
+// режимах возвращается пустой NOERROR.
+func blockedReply(r *dns.Msg, q dns.Question, mode string) *dns.Msg {
+	m := new(dns.Msg)
+	m.SetReply(r)
+	if opt := r.IsEdns0(); opt != nil {
+		m.SetEdns0(opt.UDPSize(), opt.Do())
+	}
+	if mode != config.BlockModeZero {
+		return m
+	}
+	name := dns.Fqdn(q.Name)
+	var rec string
+	switch q.Qtype {
+	case dns.TypeA:
+		rec = fmt.Sprintf("%s %d IN A 0.0.0.0", name, blockTTL)
+	case dns.TypeAAAA:
+		rec = fmt.Sprintf("%s %d IN AAAA ::", name, blockTTL)
+	default:
+		return m
+	}
+	if rr, err := dns.NewRR(rec); err == nil {
+		m.Answer = append(m.Answer, rr)
+	}
+	return m
+}
+
+// blockedInfo описывает заблокированный ответ для статистики.
+func blockedInfo(qtype uint16, entry string) *stats.AnswerInfo {
+	return &stats.AnswerInfo{
+		Rcode:     "NOERROR",
+		Qtype:     typeName(qtype),
+		Blocked:   true,
+		BlockedBy: entry,
 	}
 }
 

@@ -30,6 +30,7 @@
   .card .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
   .card .v { font-size:22px; font-weight:600; margin-top:6px; }
   .card .v.warn { color:var(--warn); }
+  .card .v.err { color:var(--err); }
   .card.clickable { cursor:pointer; -webkit-tap-highlight-color:transparent; }
   .card.clickable:hover { border-color:var(--accent); }
   .card.clickable:active { border-color:var(--accent); }
@@ -47,12 +48,24 @@
   tr.clickable:active td, tr.group-row:active td { background:rgba(79,156,249,.14); }
   td.domain { word-break:break-all; }
 
+  /* Blocked domains: мягкая красная подсветка и кнопка block/unblock */
+  tr.blocked td { background:rgba(248,81,73,.06); }
+  tr.blocked.clickable:hover td { background:rgba(248,81,73,.11); }
+  td.blk { width:1%; text-align:right; white-space:nowrap; }
+  button.icon-btn { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; padding:0; background:transparent; border:1px solid transparent; border-radius:8px; color:var(--muted); cursor:pointer; -webkit-tap-highlight-color:transparent; }
+  button.icon-btn:hover:not(:disabled) { color:var(--fg); background:var(--bg); border-color:var(--line); }
+  button.icon-btn.on { color:var(--err); }
+  button.icon-btn.on:hover:not(:disabled) { color:var(--err); border-color:rgba(248,81,73,.45); background:rgba(248,81,73,.08); }
+  button.icon-btn:disabled { cursor:default; opacity:.75; }
+  button.icon-btn svg { width:18px; height:18px; }
+
   /* Controls */
   .row { display:flex; align-items:center; justify-content:space-between; margin-top:20px; gap:12px; flex-wrap:wrap; }
   .hint { margin:8px 0 0; }
   .muted { color:var(--muted); }
   button.act { background:var(--accent); color:#fff; border:none; padding:8px 16px; border-radius:8px; cursor:pointer; font-size:14px; -webkit-tap-highlight-color:transparent; }
   button.act.secondary { background:var(--panel); border:1px solid var(--line); color:var(--fg); }
+  button.act.secondary.active { background:rgba(248,81,73,.15); border-color:var(--err); color:var(--err); }
   button.act:active { filter:brightness(.9); }
   .search-row input[type=search] { flex:1 1 320px; max-width:560px; }
   input[type=search] { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px 12px; font-size:14px; min-width:0; }
@@ -133,10 +146,12 @@
     table { display:block; background:transparent; border:none; border-radius:0; overflow:visible; }
     thead { display:none; }
     tbody { display:flex; flex-direction:column; gap:10px; }
-    tbody tr { display:grid; grid-template-columns:1fr 1fr; gap:4px 14px; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+    tbody tr { position:relative; display:grid; grid-template-columns:1fr 1fr; gap:4px 14px; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+    tbody tr.blocked { border-color:rgba(248,81,73,.4); }
     tbody td { display:block; border:none; padding:0; min-width:0; overflow-wrap:anywhere; }
     tbody td.idx { display:none; }
-    tbody td.domain, tbody td.name { grid-column:1/-1; font-weight:600; word-break:break-all; }
+    tbody td.domain, tbody td.name { grid-column:1/-1; font-weight:600; word-break:break-all; padding-right:34px; }
+    tbody td.blk { position:absolute; top:8px; right:8px; width:auto; }
     tbody td.num { display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
     tbody td.num::before, tbody td.kv::before, tbody td.wide::before { content:attr(data-label); color:var(--muted); font-size:12px; flex:none; }
     tbody td.kv { display:flex; align-items:baseline; justify-content:space-between; gap:8px; font-size:13px; }
@@ -214,6 +229,7 @@
       <div class="card"><div class="k">Misses</div><div class="v" id="c-misses">—</div></div>
       <div class="card"><div class="k">Hit rate</div><div class="v" id="c-rate">—</div></div>
       <div class="card clickable" onclick="showTab('sf')" title="Show SERVFAIL details"><div class="k">SERVFAIL</div><div class="v" id="c-servfail">—</div></div>
+      <div class="card clickable" onclick="showBlocked()" title="Show only blocked domains"><div class="k">Blocked</div><div class="v" id="c-blocked">—</div></div>
       <div class="card"><div class="k">Domains</div><div class="v" id="c-domains">—</div></div>
       <div class="card"><div class="k">Cache entries</div><div class="v" id="c-cache">—</div></div>
       <div class="card"><div class="k">Uptime</div><div class="v" id="c-uptime">—</div></div>
@@ -224,11 +240,12 @@
     </div>
     <div class="row search-row" style="margin-top:12px">
       <input type="search" id="search" placeholder="Search by domain (substring)" onkeydown="if (event.key === 'Enter') applySearch()" oninput="if (!this.value.trim() && search !== '') applySearch()">
+      <button id="blocked-toggle" class="act secondary" onclick="toggleBlockedOnly()" title="Show only blocked domains">Blocked only</button>
       <span id="domains-total" class="muted"></span>
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>#</th><th>Domain</th><th class="num">Requests</th><th class="num">Cache Hits</th><th class="num">Peak RPM</th></tr></thead>
+        <thead><tr><th>#</th><th>Domain</th><th class="num">Requests</th><th class="num">Cache Hits</th><th class="num">Peak RPM</th><th class="blk"></th></tr></thead>
         <tbody id="top"></tbody>
       </table>
     </div>
@@ -305,6 +322,7 @@ let timer = null;
 let activeTab = 'dash';
 let page = 1;
 let search = '';
+let blockedOnly = false;
 let pages = 0;
 let sfPage = 1;
 let sfPages = 0;
@@ -388,6 +406,9 @@ async function loadStats() {
     const sf = document.getElementById('c-servfail');
     sf.textContent = fmt(d.servfail);
     sf.classList.toggle('warn', d.servfail > 0);
+    const bl = document.getElementById('c-blocked');
+    bl.textContent = fmt(d.blocked);
+    bl.classList.toggle('err', d.blocked > 0);
     document.getElementById('c-domains').textContent = fmt(d.domains);
     document.getElementById('c-cache').textContent = fmt(d.cache_len);
     document.getElementById('c-uptime').textContent = uptime(d.uptime_seconds || 0);
@@ -399,7 +420,8 @@ async function loadStats() {
 
 async function loadDomains() {
   try {
-    const qs = '?page=' + page + '&limit=' + PAGE_SIZE + '&search=' + encodeURIComponent(search);
+    const qs = '?page=' + page + '&limit=' + PAGE_SIZE + '&search=' + encodeURIComponent(search) +
+      (blockedOnly ? '&blocked=1' : '');
     const r = await fetch('/api/domains' + qs, {cache:'no-store'});
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
@@ -418,16 +440,16 @@ function renderRows(items) {
   if (!items.length) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 5;
+    td.colSpan = 6;
     td.className = 'empty muted';
-    td.textContent = search ? 'Nothing found' : 'No data yet';
+    td.textContent = blockedOnly ? 'No blocked domains' : (search ? 'Nothing found' : 'No data yet');
     tr.appendChild(td);
     body.appendChild(tr);
     return;
   }
   items.forEach((x, i) => {
     const tr = document.createElement('tr');
-    tr.className = 'clickable';
+    tr.className = 'clickable' + (x.blocked ? ' blocked' : '');
     tr.title = 'Show last answer';
     tr.innerHTML = '<td class="idx muted">' + ((page - 1) * PAGE_SIZE + i + 1) + '</td>' +
       '<td class="domain" data-label="Domain"></td>' +
@@ -435,10 +457,63 @@ function renderRows(items) {
       '<td class="num" data-label="Cache hits">' + fmt(x.cache_hits) + '</td>' +
       '<td class="num" data-label="Peak RPM">' + fmt(x.peak_rpm) + '</td>';
     tr.children[1].textContent = x.domain;
+    tr.appendChild(blockCell(x));
     tr.addEventListener('click', () => showDomain(x.domain));
     body.appendChild(tr);
   });
 }
+
+// blockCell — кнопка block/unblock в строке домена. Если домен заблокирован
+// родительской записью, снять блокировку с этой строки нельзя: кнопка
+// показывает состояние и подсказывает, какой домен блокирует.
+function blockCell(x) {
+  const td = document.createElement('td');
+  td.className = 'blk';
+  const btn = document.createElement('button');
+  btn.className = 'icon-btn' + (x.blocked ? ' on' : '');
+  const byParent = x.blocked && x.blocked_by && x.blocked_by !== x.domain;
+  if (byParent) {
+    btn.disabled = true;
+    btn.title = 'Blocked by ' + x.blocked_by;
+    td.title = btn.title; // подсказка видна и у disabled-кнопки
+  } else if (x.blocked) {
+    btn.title = 'Unblock domain';
+  } else {
+    btn.title = 'Block domain and subdomains';
+  }
+  btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>';
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    if (!btn.disabled) toggleBlock(x);
+  });
+  td.appendChild(btn);
+  return td;
+}
+
+async function toggleBlock(x) {
+  const method = x.blocked ? 'DELETE' : 'PUT';
+  try {
+    const r = await fetch('/api/block?name=' + encodeURIComponent(x.domain), {method, cache:'no-store'});
+    if (!r.ok) throw new Error((await r.text()).trim() || ('HTTP ' + r.status));
+    await refresh();
+  } catch (e) {
+    document.getElementById('status').textContent = 'error: ' + e.message;
+  }
+}
+
+function setBlockedOnly(v) {
+  blockedOnly = v;
+  page = 1;
+  document.getElementById('blocked-toggle').classList.toggle('active', v);
+  if (activeTab !== 'dash') { showTab('dash'); return; }
+  loadDomains();
+}
+
+function toggleBlockedOnly() { setBlockedOnly(!blockedOnly); }
+
+// showBlocked — клик по карточке Blocked: включает фильтр «только
+// заблокированные» и переходит на вкладку Stats.
+function showBlocked() { setBlockedOnly(true); }
 
 function renderPager(d) {
   document.getElementById('domains-total').textContent = d.total ? 'Total: ' + fmt(d.total) : '';
@@ -715,9 +790,20 @@ function renderDomain(d) {
   box.innerHTML = '';
   box.className = '';
   const negative = d.negative || [];
+  if (d.blocked) {
+    const card = document.createElement('div');
+    card.className = 'answer-card';
+    card.appendChild(renderMeta([
+      ['Status', 'BLOCKED', 'rcode-err'],
+      ['Blocked by', d.blocked_by || d.domain],
+    ]));
+    box.appendChild(card);
+  }
   if (!d.answer && !negative.length) {
-    box.className = 'muted';
-    box.textContent = 'No answer recorded yet.';
+    if (!d.blocked) {
+      box.className = 'muted';
+      box.textContent = 'No answer recorded yet.';
+    }
     return;
   }
   if (d.answer) box.appendChild(renderAnswer(d.answer));
@@ -729,18 +815,22 @@ function renderAnswer(last) {
   card.className = 'answer-card';
 
   const when = fmtTime(last.at);
+  const blocked = !!last.blocked;
   const ok = last.rcode === 'NOERROR';
   const rows = [
-    ['Status', ok ? 'OK' : (last.rcode || '—'), ok ? 'rcode-ok' : 'rcode-err'],
-    ['Source', last.from_cache ? 'cache' : 'upstream'],
+    ['Status', blocked ? 'BLOCKED' : (ok ? 'OK' : (last.rcode || '—')), blocked ? 'rcode-err' : (ok ? 'rcode-ok' : 'rcode-err')],
+    ['Source', blocked ? 'blocklist' : (last.from_cache ? 'cache' : 'upstream')],
   ];
+  if (blocked && last.blocked_by) rows.push(['Blocked by', last.blocked_by]);
   if (last.upstream) rows.push(['Upstream', last.upstream]);
   if (!last.from_cache && last.duration_ms > 0) rows.push(['Duration', fmtDuration(last.duration_ms)]);
   rows.push(['Time', when]);
   card.appendChild(renderMeta(rows));
 
-  card.appendChild(subLabel('Answer'));
-  card.appendChild(preBlock(last.records || []));
+  if (last.records && last.records.length) {
+    card.appendChild(subLabel('Answer'));
+    card.appendChild(preBlock(last.records));
+  }
   if (last.authority && last.authority.length) {
     card.appendChild(subLabel('Authority (NS)'));
     card.appendChild(preBlock(last.authority));

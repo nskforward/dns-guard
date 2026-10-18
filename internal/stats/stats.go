@@ -38,6 +38,10 @@ type DomainStat struct {
 	Total     uint64 `json:"total"`
 	CacheHits uint64 `json:"cache_hits"`
 	PeakRPM   uint64 `json:"peak_rpm"`
+	// Blocked — домен (или его родитель) в блоклисте. BlockedBy — запись
+	// блоклиста, которая сработала.
+	Blocked   bool   `json:"blocked"`
+	BlockedBy string `json:"blocked_by,omitempty"`
 }
 
 // AnswerInfo — сведения о последнем ответе, выданном по домену.
@@ -51,7 +55,11 @@ type AnswerInfo struct {
 	FromCache  bool          `json:"from_cache"`
 	DurationMs float64       `json:"duration_ms,omitempty"` // время запроса через апстрим, мс
 	Attempts   []AttemptInfo `json:"attempts,omitempty"`    // цепочка попыток (только промах кэша)
-	At         time.Time     `json:"at"`
+	// Blocked — ответ выдан блоклистом, а не апстримом; BlockedBy — сработавшая
+	// запись блоклиста.
+	Blocked   bool      `json:"blocked,omitempty"`
+	BlockedBy string    `json:"blocked_by,omitempty"`
+	At        time.Time `json:"at"`
 }
 
 // AttemptInfo — одна попытка обращения к апстриму группы: кто ответил, с каким
@@ -139,6 +147,7 @@ type Snapshot struct {
 	CacheHits   uint64            `json:"cache_hits"`
 	CacheMisses uint64            `json:"cache_misses"`
 	Servfail    uint64            `json:"servfail"`
+	Blocked     uint64            `json:"blocked"`
 	Domains     int               `json:"domains"`
 	Groups      map[string]uint64 `json:"groups"`
 }
@@ -212,6 +221,7 @@ type Stats struct {
 	cacheHits   atomic.Uint64
 	cacheMisses atomic.Uint64
 	servfail    atomic.Uint64
+	blocked     atomic.Uint64
 
 	mu             sync.Mutex
 	domains        map[string]*domain
@@ -255,9 +265,15 @@ func (s *Stats) SetMaxDomains(n int) {
 // info — сведения о выданном ответе (может быть nil).
 func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 	s.total.Add(1)
-	if hit {
+	blocked := info != nil && info.Blocked
+	switch {
+	case blocked:
+		// Заблокированный запрос не ходил ни в кэш, ни к апстриму: он не
+		// должен искажать статистику попаданий.
+		s.blocked.Add(1)
+	case hit:
 		s.cacheHits.Add(1)
-	} else {
+	default:
 		s.cacheMisses.Add(1)
 	}
 	failed := info != nil && info.Rcode == "SERVFAIL"
@@ -320,7 +336,12 @@ func (s *Stats) Record(qname, group string, hit bool, info *AnswerInfo) {
 	}
 	if info != nil {
 		cp := cloneAnswer(info, at)
-		if cp.successful() {
+		if cp.Blocked {
+			// Заблокированный ответ сохраняется как ответ по типу: он
+			// вытесняет прежние положительные записи, чтобы в сводке домена
+			// не показывались адреса, которые больше не выдаются.
+			d.storeAnswer(&cp)
+		} else if cp.successful() {
 			d.storeAnswer(&cp)
 		} else if !failed {
 			// NODATA (NOERROR без записей) и NXDOMAIN: успешные записи не
@@ -462,7 +483,10 @@ func (s *Stats) UpstreamsPage() []GroupStat {
 // запросов. search — подстрока имени без учёта регистра (пустая — все домены).
 // page нумеруется с единицы; size по умолчанию DefaultPageSize и не больше
 // MaxPageSize. Текущая минута каждого домена финализируется на момент вызова.
-func (s *Stats) DomainsPage(page, size int, search string) DomainsPage {
+//
+// isBlocked (может быть nil) проставляет в элементах Blocked/BlockedBy;
+// blockedOnly оставляет только домены, заблокированные согласно isBlocked.
+func (s *Stats) DomainsPage(page, size int, search string, blockedOnly bool, isBlocked func(string) (string, bool)) DomainsPage {
 	if size <= 0 {
 		size = DefaultPageSize
 	}
@@ -481,7 +505,18 @@ func (s *Stats) DomainsPage(page, size int, search string) DomainsPage {
 		if query != "" && !strings.Contains(name, query) {
 			continue
 		}
-		out = append(out, statOf(name, d, mid))
+		var entry string
+		var blocked bool
+		if isBlocked != nil {
+			entry, blocked = isBlocked(name)
+		}
+		if blockedOnly && !blocked {
+			continue
+		}
+		st := statOf(name, d, mid)
+		st.Blocked = blocked
+		st.BlockedBy = entry
+		out = append(out, st)
 	}
 	s.mu.Unlock()
 
@@ -691,6 +726,7 @@ func (s *Stats) Snapshot() Snapshot {
 		CacheHits:   s.cacheHits.Load(),
 		CacheMisses: s.cacheMisses.Load(),
 		Servfail:    s.servfail.Load(),
+		Blocked:     s.blocked.Load(),
 		Domains:     domains,
 		Groups:      groups,
 	}
