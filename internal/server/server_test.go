@@ -141,10 +141,10 @@ func TestServeDNSMissThenHit(t *testing.T) {
 
 	// Последний успешный ответ по домену сохранён (второй запрос из кэша).
 	info, ok := ss.DomainInfo("example.com")
-	if !ok || info.Answer == nil {
+	if !ok || len(info.Answers) != 1 {
 		t.Fatalf("last answer not recorded: %+v", info)
 	}
-	last := info.Answer
+	last := info.Answers[0]
 	if last.Rcode != "NOERROR" || !last.FromCache || len(last.Records) != 1 {
 		t.Fatalf("last = %+v", last)
 	}
@@ -374,8 +374,8 @@ func TestServeDNSRecordsNoDataAttempts(t *testing.T) {
 	if !ok {
 		t.Fatal("domain not found")
 	}
-	if di.Answer != nil {
-		t.Fatalf("NODATA must not produce successful answer: %+v", di.Answer)
+	if len(di.Answers) != 0 {
+		t.Fatalf("NODATA must not produce successful answer: %+v", di.Answers)
 	}
 	if len(di.Negative) != 1 {
 		t.Fatalf("negative = %+v", di.Negative)
@@ -414,14 +414,14 @@ func TestServeDNSPositiveAfterNoDataKeepsChain(t *testing.T) {
 	s.ServeDNS(&mockWriter{}, query("example.com", dns.TypeA))
 
 	di, ok := ss.DomainInfo("example.com")
-	if !ok || di.Answer == nil {
+	if !ok || len(di.Answers) != 1 {
 		t.Fatalf("answer not recorded: %+v", di)
 	}
 	if len(di.Negative) != 0 {
 		t.Fatalf("negative must be empty: %+v", di.Negative)
 	}
-	if len(di.Answer.Attempts) != 2 || di.Answer.Attempts[0].Status != "NODATA" || di.Answer.Attempts[1].Status != "OK" {
-		t.Fatalf("attempts = %+v", di.Answer.Attempts)
+	if a := di.Answers[0]; len(a.Attempts) != 2 || a.Attempts[0].Status != "NODATA" || a.Attempts[1].Status != "OK" {
+		t.Fatalf("attempts = %+v", a.Attempts)
 	}
 }
 

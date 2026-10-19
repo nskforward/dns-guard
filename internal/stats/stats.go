@@ -87,12 +87,14 @@ func (a *AnswerInfo) successful() bool {
 	return a.Rcode == "NOERROR" && len(a.Records) > 0
 }
 
-// DomainInfo — статистика домена и сводные сведения о том, что известно по
-// домену: все записи, склеенные из последних успешных ответов по каждому типу
-// запроса, и последний выданный ответ.
+// DomainInfo — статистика домена и сведения о том, что известно по домену:
+// последние успешные ответы по каждому типу запроса, негативные ответы и
+// последний выданный ответ.
 type DomainInfo struct {
 	DomainStat
-	Answer   *AnswerInfo  `json:"answer,omitempty"`   // склейка успешных ответов по qtype
+	// Answers — последние успешные ответы по каждому qtype, свежие сверху.
+	// Ответы разных типов не склеиваются: каждый показывается со своим типом.
+	Answers  []AnswerInfo `json:"answers,omitempty"`
 	Negative []AnswerInfo `json:"negative,omitempty"` // последние NODATA/NXDOMAIN по qtype, свежие сверху
 	// Last — последний выданный ответ любого типа (включая SERVFAIL). Именно
 	// по нему строится Status в таблице доменов.
@@ -644,23 +646,23 @@ func (s *Stats) DomainInfo(name string) (DomainInfo, bool) {
 		info.Last = &cp
 	}
 	if len(d.answers) > 0 {
-		a := mergedAnswer(d.answers)
-		info.Answer = &a
+		info.Answers = latestByQtype(d.answers)
 	}
 	if len(d.negative) > 0 {
-		info.Negative = mergedNegative(d.negative)
+		info.Negative = latestByQtype(d.negative)
 	}
 	s.mu.Unlock()
 
 	return info, true
 }
 
-// mergedNegative возвращает последние негативные ответы по каждому qtype,
-// свежие сверху. Записи не склеиваются: у NODATA/NXDOMAIN их нет, а тип
-// запроса важен для понимания, что именно проверялось.
-func mergedNegative(negative map[string]*AnswerInfo) []AnswerInfo {
-	out := make([]AnswerInfo, 0, len(negative))
-	for _, a := range negative {
+// latestByQtype возвращает по одному последнему ответу на каждый тип запроса,
+// свежие сверху. Ответы разных типов не склеиваются: в карточке домена каждый
+// из них показывается со своим qtype (иначе положительный ответ по A выглядел
+// бы как ответ на запрос HTTPS).
+func latestByQtype(m map[string]*AnswerInfo) []AnswerInfo {
+	out := make([]AnswerInfo, 0, len(m))
+	for _, a := range m {
 		out = append(out, cloneAnswer(a, a.At))
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -669,43 +671,6 @@ func mergedNegative(negative map[string]*AnswerInfo) []AnswerInfo {
 		}
 		return out[i].Qtype < out[j].Qtype
 	})
-	return out
-}
-
-// mergedAnswer склеивает последние успешные ответы по всем qtype в один:
-// записи объединяются и дедуплицируются, а атрибуты (источник, апстрим,
-// длительность, время) берутся у самого свежего ответа.
-func mergedAnswer(answers map[string]*AnswerInfo) AnswerInfo {
-	var latest *AnswerInfo
-	for _, a := range answers {
-		if latest == nil || a.At.After(latest.At) ||
-			(a.At.Equal(latest.At) && a.Qtype < latest.Qtype) {
-			latest = a
-		}
-	}
-	out := cloneAnswer(latest, latest.At)
-	// Сводный ответ не относится к одному типу запроса.
-	out.Qtype = ""
-	out.Records = mergeUnique(answers, func(a *AnswerInfo) []string { return a.Records })
-	out.Authority = mergeUnique(answers, func(a *AnswerInfo) []string { return a.Authority })
-	return out
-}
-
-// mergeUnique объединяет выбранные строки всех ответов, убирает дубликаты и
-// сортирует результат, чтобы порядок записей был стабильным.
-func mergeUnique(answers map[string]*AnswerInfo, pick func(*AnswerInfo) []string) []string {
-	var out []string
-	seen := make(map[string]struct{})
-	for _, a := range answers {
-		for _, line := range pick(a) {
-			if _, ok := seen[line]; ok {
-				continue
-			}
-			seen[line] = struct{}{}
-			out = append(out, line)
-		}
-	}
-	sort.Strings(out)
 	return out
 }
 

@@ -316,29 +316,46 @@ func TestDomainInfoLastAnswers(t *testing.T) {
 	if di.Domain != "api.example.com" || di.Total != 5 {
 		t.Fatalf("info = %+v", di)
 	}
-	if di.Answer == nil {
-		t.Fatal("answer must be present")
+	// Успешные ответы хранятся по типам и не склеиваются: самый свежий — A.
+	if len(di.Answers) != 2 {
+		t.Fatalf("answers = %+v", di.Answers)
 	}
-	a := di.Answer
-	want := []string{
-		"api.example.com. 30 IN A 5.6.7.8",
-		"api.example.com. 30 IN AAAA 2001:db8::1",
-		"api.example.com. 30 IN CNAME alias.example.com.",
-	}
-	if a.Rcode != "NOERROR" || a.Qtype != "" || len(a.Records) != len(want) {
+	a := di.Answers[0]
+	if a.Qtype != "A" || a.Rcode != "NOERROR" || a.Upstream != "9.9.9.9:53" ||
+		a.FromCache || !a.At.Equal(time.Unix(130, 0)) {
 		t.Fatalf("answer = %+v", a)
 	}
-	for i, rec := range want {
+	wantA := []string{
+		"api.example.com. 30 IN A 5.6.7.8",
+		"api.example.com. 30 IN CNAME alias.example.com.",
+	}
+	if len(a.Records) != len(wantA) {
+		t.Fatalf("records = %v, want %v", a.Records, wantA)
+	}
+	for i, rec := range wantA {
 		if a.Records[i] != rec {
 			t.Fatalf("records[%d] = %q, want %q", i, a.Records[i], rec)
 		}
 	}
-	// Qtype — сводный ответ; атрибуты — от самого свежего успешного ответа.
-	if a.Upstream != "9.9.9.9:53" || a.FromCache || !a.At.Equal(time.Unix(130, 0)) {
-		t.Fatalf("answer attributes = %+v", a)
-	}
 	if len(a.Authority) != 0 {
 		t.Fatalf("authority = %+v", a.Authority)
+	}
+	// Ответ по AAAA — отдельная запись со своим типом и своими записями.
+	aaaa := di.Answers[1]
+	if aaaa.Qtype != "AAAA" || aaaa.Upstream != "8.8.8.8:53" || !aaaa.At.Equal(time.Unix(120, 0)) {
+		t.Fatalf("AAAA answer = %+v", aaaa)
+	}
+	wantAAAA := []string{
+		"api.example.com. 30 IN AAAA 2001:db8::1",
+		"api.example.com. 30 IN CNAME alias.example.com.",
+	}
+	if len(aaaa.Records) != len(wantAAAA) {
+		t.Fatalf("AAAA records = %v, want %v", aaaa.Records, wantAAAA)
+	}
+	for i, rec := range wantAAAA {
+		if aaaa.Records[i] != rec {
+			t.Fatalf("AAAA records[%d] = %q, want %q", i, aaaa.Records[i], rec)
+		}
 	}
 	// Last — самый свежий выданный ответ (SERVFAIL), именно по нему строится
 	// Status в таблице доменов.
@@ -351,7 +368,7 @@ func TestDomainInfoLastAnswers(t *testing.T) {
 	now = time.Unix(150, 0)
 	s.Record("nx.example.com.", "g", false, &AnswerInfo{Rcode: "NXDOMAIN", Qtype: "A"})
 	di, ok = s.DomainInfo("nx.example.com")
-	if !ok || di.Answer != nil {
+	if !ok || len(di.Answers) != 0 {
 		t.Fatalf("info = %+v", di)
 	}
 	if di.Last == nil || di.Last.Rcode != "NXDOMAIN" {
@@ -456,9 +473,10 @@ func TestDomainInfoNegative(t *testing.T) {
 	if !ok {
 		t.Fatal("domain not found")
 	}
-	// Негативные ответы не затирают успешную сводку.
-	if di.Answer == nil || di.Answer.Rcode != "NOERROR" || len(di.Answer.Records) != 1 {
-		t.Fatalf("answer = %+v", di.Answer)
+	// Негативные ответы не затирают успешный ответ своего типа.
+	if len(di.Answers) != 1 || di.Answers[0].Qtype != "A" ||
+		di.Answers[0].Rcode != "NOERROR" || len(di.Answers[0].Records) != 1 {
+		t.Fatalf("answers = %+v", di.Answers)
 	}
 	if len(di.Negative) != 2 {
 		t.Fatalf("negative = %+v", di.Negative)
@@ -512,16 +530,16 @@ func TestAnswersPerDomainLimit(t *testing.T) {
 	if !ok {
 		t.Fatal("domain not found")
 	}
-	if di.Answer == nil {
-		t.Fatal("answer must be present")
-	}
-	if len(di.Answer.Records) != maxAnswersPerDomain {
-		t.Fatalf("records = %d, want %d", len(di.Answer.Records), maxAnswersPerDomain)
+	if len(di.Answers) != maxAnswersPerDomain {
+		t.Fatalf("answers = %d, want %d", len(di.Answers), maxAnswersPerDomain)
 	}
 	// Самые старые типы вытеснены.
-	for _, rec := range di.Answer.Records {
-		if rec == "a.test. 60 IN TXT rec0" || rec == "a.test. 60 IN TXT rec1" {
-			t.Fatalf("oldest record %q must be evicted", rec)
+	for _, a := range di.Answers {
+		if a.Qtype == "T0" || a.Qtype == "T1" {
+			t.Fatalf("oldest type %q must be evicted", a.Qtype)
+		}
+		if len(a.Records) != 1 {
+			t.Fatalf("records of %q = %v", a.Qtype, a.Records)
 		}
 	}
 }
@@ -543,7 +561,7 @@ func TestRecordBlocked(t *testing.T) {
 		t.Fatalf("snapshot = %+v", snap)
 	}
 	di, ok := s.DomainInfo("ads.example.com")
-	if !ok || di.Answer == nil || !di.Answer.Blocked || di.Answer.BlockedBy != "example.com" {
+	if !ok || len(di.Answers) != 1 || !di.Answers[0].Blocked || di.Answers[0].BlockedBy != "example.com" {
 		t.Fatalf("domain info = %+v", di)
 	}
 	if len(di.Negative) != 0 {
@@ -694,7 +712,7 @@ func TestDomainStatus(t *testing.T) {
 
 // TestDomainsPagePerType проверяет, что запросы разных типов к одному домену
 // дают отдельные строки со своими счётчиками и статусами, а карточка домена
-// остаётся сводной.
+// показывает успешные ответы по типам, не смешивая их.
 func TestDomainsPagePerType(t *testing.T) {
 	s := New(0)
 	s.Record("mdm.example.com.", "g", false, &AnswerInfo{
@@ -728,10 +746,18 @@ func TestDomainsPagePerType(t *testing.T) {
 		t.Fatalf("bad page = %+v", bad)
 	}
 
-	// Карточка домена по-прежнему сводная: общий Total и склейка записей.
+	// Карточка домена: общий Total, но успешный ответ только по A. NODATA по
+	// HTTPS не должен подмешиваться к записям A (иначе положительный ответ A
+	// выглядит как ответ на HTTPS-запрос).
 	di, ok := s.DomainInfo("mdm.example.com")
-	if !ok || di.Total != 3 || di.Answer == nil || len(di.Answer.Records) != 1 {
+	if !ok || di.Total != 3 {
 		t.Fatalf("domain info = %+v", di)
+	}
+	if len(di.Answers) != 1 || di.Answers[0].Qtype != "A" || len(di.Answers[0].Records) != 1 {
+		t.Fatalf("answers = %+v", di.Answers)
+	}
+	if len(di.Negative) != 1 || di.Negative[0].Qtype != "HTTPS" {
+		t.Fatalf("negative = %+v", di.Negative)
 	}
 }
 

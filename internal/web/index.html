@@ -724,6 +724,7 @@ function renderDomain(d) {
   box.innerHTML = '';
   box.className = '';
   const negative = d.negative || [];
+  const answers = d.answers || [];
   // Последний ответ — тот, по которому построен Status в таблице. Показываем
   // его первой карточкой, если он не успешный: так иконка всегда объяснима
   // (SERVFAIL раньше не был виден в деталях вовсе).
@@ -732,7 +733,7 @@ function renderDomain(d) {
   const showLast = lastSt !== '' && lastSt !== 'ok' && lastSt !== 'blocked';
   // Заблокированный ответ уже показан карточкой ответа (Status/Reason/Source/
   // Blocked by), поэтому отдельную сводку о блокировке для него не выводим.
-  const blockedAnswer = !!(d.answer && d.answer.blocked);
+  const blockedAnswer = answers.some(a => a.blocked);
   if (showLast) box.appendChild(renderLast(last));
   if (d.blocked && !blockedAnswer) {
     const card = document.createElement('div');
@@ -744,14 +745,14 @@ function renderDomain(d) {
     ]));
     box.appendChild(card);
   }
-  if (!d.answer && !negative.length && !showLast) {
+  if (!answers.length && !negative.length && !showLast) {
     if (!d.blocked) {
       box.className = 'muted';
       box.textContent = 'No answer recorded yet.';
     }
     return;
   }
-  if (d.answer) box.appendChild(renderAnswer(d.answer));
+  answers.forEach(a => box.appendChild(renderAnswer(a)));
   negative.forEach(n => {
     // Не дублируем запись, уже показанную карточкой последнего ответа.
     if (showLast && last && n.qtype === last.qtype && n.at === last.at) return;
@@ -790,6 +791,7 @@ function renderAnswer(last) {
   ];
   if (blocked) rows.push(['Reason', 'BLOCKED', 'rcode-err']);
   else if (!ok) rows.push(['Reason', last.rcode || '—', 'rcode-err']);
+  rows.push(['Type', last.qtype || '—']);
   rows.push(['Source', sourceLabel(last, blocked)]);
   if (blocked && last.blocked_by) rows.push(['Blocked by', last.blocked_by]);
   if (!last.from_cache && last.duration_ms > 0) rows.push(['Duration', fmtDuration(last.duration_ms)]);

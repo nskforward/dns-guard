@@ -102,8 +102,9 @@ func TestDomainsAPI(t *testing.T) {
 	if info.Domain != "a.example.com" || info.Total != 1 {
 		t.Fatalf("info = %+v", info)
 	}
-	if info.Answer == nil || info.Answer.Rcode != "NOERROR" || info.Answer.Upstream != "1.1.1.1:53" {
-		t.Fatalf("answer = %+v", info.Answer)
+	if len(info.Answers) != 1 || info.Answers[0].Qtype != "A" ||
+		info.Answers[0].Rcode != "NOERROR" || info.Answers[0].Upstream != "1.1.1.1:53" {
+		t.Fatalf("answers = %+v", info.Answers)
 	}
 	if info.Last == nil || info.Last.Rcode != "NOERROR" || info.Last.Qtype != "A" ||
 		info.Last.Upstream != "1.1.1.1:53" {
@@ -145,8 +146,8 @@ func TestDomainNegativeAPI(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if info.Answer != nil {
-		t.Fatalf("answer = %+v, want nil", info.Answer)
+	if len(info.Answers) != 0 {
+		t.Fatalf("answers = %+v, want none", info.Answers)
 	}
 	if len(info.Negative) != 1 {
 		t.Fatalf("negative = %+v", info.Negative)
