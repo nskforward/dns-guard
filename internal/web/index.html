@@ -337,14 +337,16 @@ function fmt(n) { return (n ?? 0).toLocaleString('en-US'); }
 function pct(part, total) { return total ? Math.round(part * 100 / total) + '%' : '—'; }
 function fmtDuration(ms) { return ms >= 1000 ? (ms / 1000).toFixed(2) + ' s' : ms.toFixed(1) + ' ms'; }
 
-// fmtTime — компактный формат даты/времени, чтобы строки влезали на мобильных.
+// fmtTime — формат точной даты/времени: YYYY-MM-DD HH:mm:ss.000.
 function fmtTime(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '—';
-  const p = n => String(n).padStart(2, '0');
-  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
-    p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  const p2 = n => String(n).padStart(2, '0');
+  const p3 = n => String(n).padStart(3, '0');
+  return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' +
+    p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds()) + '.' +
+    p3(d.getMilliseconds());
 }
 
 function uptime(sec) {
@@ -396,7 +398,7 @@ async function loadStats() {
     document.getElementById('c-domains').textContent = fmt(d.domains);
     document.getElementById('c-cache').textContent = fmt(d.cache_len);
     document.getElementById('c-uptime').textContent = uptime(d.uptime_seconds || 0);
-    document.getElementById('status').textContent = 'updated ' + new Date().toLocaleTimeString('en-US');
+    document.getElementById('status').textContent = 'updated ' + fmtTime(new Date());
   } catch (e) {
     document.getElementById('status').textContent = 'error: ' + e.message;
   }
