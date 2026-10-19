@@ -36,8 +36,7 @@ const (
 type TypeStat struct {
 	Type string `json:"type"`
 	// Status — состояние последнего ответа на запросы этого типа: "ok",
-	// "nodata" (NOERROR без записей, в том числе для AAAA/HTTPS/SVCB),
-	// "servfail"/"nxdomain"/"bad"/"blocked".
+	// "nodata" (NOERROR без записей), "servfail"/"nxdomain"/"bad"/"blocked".
 	Status    string `json:"status,omitempty"`
 	Total     uint64 `json:"total"`
 	CacheHits uint64 `json:"cache_hits"`
@@ -544,9 +543,10 @@ func (s *Stats) UpstreamsPage() []GroupStat {
 // isBlocked (может быть nil) проставляет в элементах Blocked/BlockedBy;
 // blockedOnly оставляет только строки заблокированных доменов;
 // badOnly оставляет домены, у которых хотя бы один тип запроса имеет
-// проблемный последний ответ (bad/servfail/nxdomain/nodata), исключая ok,
-// blocked и строки без ответов. NODATA для AAAA/HTTPS/SVCB проблемным не
-// считается. status (пустая строка — без фильтра) оставляет домены, у которых
+// проблемный последний ответ (bad/servfail/nxdomain), исключая ok, blocked и
+// строки без ответов. NODATA любого типа проблемным не считается: пустой
+// NOERROR — штатный ответ, который к тому же проверяется остальными серверами
+// группы. status (пустая строка — без фильтра) оставляет домены, у которых
 // статус последнего ответа домена или любого его типа равен указанному:
 // ok, servfail, nxdomain, nodata, blocked или bad.
 func (s *Stats) DomainsPage(page, size int, search string, blockedOnly, badOnly bool, status string, isBlocked func(string) (string, bool)) DomainsPage {
@@ -601,7 +601,7 @@ func (s *Stats) DomainsPage(page, size int, search string, blockedOnly, badOnly 
 			}
 			tst := TypeStat{
 				Type:      qtype,
-				Status:    typeStatusOf(ts.last),
+				Status:    statusOf(ts.last),
 				Total:     ts.total,
 				CacheHits: ts.hits,
 			}
@@ -831,7 +831,7 @@ func domainIsBad(st DomainStat) bool {
 		return isBadStatus(st.Status)
 	}
 	for _, t := range st.Types {
-		if typeIsBad(t.Type, t.Status) {
+		if isBadStatus(t.Status) {
 			return true
 		}
 	}
@@ -853,51 +853,21 @@ func domainHasStatus(st DomainStat, status string) bool {
 }
 
 // isBadStatus сообщает, что статус последнего ответа считается проблемным:
-// ошибка, SERVFAIL, NXDOMAIN или NODATA. ok, blocked и пустой статус
-// проблемными не считаются.
+// ошибка, SERVFAIL или NXDOMAIN. ok, nodata (NOERROR без записей), blocked и
+// пустой статус проблемными не считаются: пустой ответ штатен для любого типа
+// запроса и дополнительно проверяется остальными серверами группы.
 func isBadStatus(status string) bool {
 	switch status {
-	case "bad", "servfail", "nxdomain", "nodata":
+	case "bad", "servfail", "nxdomain":
 		return true
 	}
 	return false
 }
 
-// typeIsBad сообщает, считается ли статус типа проблемным для фильтра bad=1.
-// NODATA для AAAA/HTTPS/SVCB — штатный ответ и проблемой не считается, хотя
-// на бейдже показывается жёлтым (записи этого типа у домена нет).
-func typeIsBad(qtype, status string) bool {
-	if status == "nodata" && emptyIsNormal(qtype) {
-		return false
-	}
-	return isBadStatus(status)
-}
-
-// typeStatusOf классифицирует последний ответ на запросы одного типа для
-// бейджа в таблице доменов. В отличие от statusOf, NODATA (NOERROR без
-// записей) для любого типа, включая AAAA/HTTPS/SVCB, получает статус
-// "nodata": бейдж показывает, что записи этого типа у домена нет.
-func typeStatusOf(a *AnswerInfo) string {
-	switch {
-	case a == nil:
-		return ""
-	case a.Blocked:
-		return "blocked"
-	case a.Rcode == "SERVFAIL":
-		return "servfail"
-	case a.Rcode == "NXDOMAIN":
-		return "nxdomain"
-	case a.successful():
-		return "ok"
-	case a.Rcode == "NOERROR":
-		return "nodata"
-	default:
-		return "bad"
-	}
-}
-
-// statusOf классифицирует последний ответ домена для колонки Status.
-// NODATA для AAAA/HTTPS/SVCB — штатный ответ и получает статус ok.
+// statusOf классифицирует последний ответ домена или отдельного типа запроса
+// для бейджа в таблице доменов. NODATA (NOERROR без записей) для любого типа
+// получает статус "nodata": бейдж показывает, что записи этого типа у домена
+// нет, но проблемным такой ответ не считается.
 func statusOf(a *AnswerInfo) string {
 	switch {
 	case a == nil:
@@ -910,25 +880,11 @@ func statusOf(a *AnswerInfo) string {
 		return "nxdomain"
 	case a.successful():
 		return "ok"
-	case a.Rcode == "NOERROR" && emptyIsNormal(a.Qtype):
-		// NODATA для AAAA/HTTPS/SVCB — штатный ответ: у домена может просто
-		// не быть IPv6- или HTTPS/SVCB-записей. Проблемой он не считается.
-		return "ok"
 	case a.Rcode == "NOERROR":
 		return "nodata"
 	default:
 		return "bad"
 	}
-}
-
-// emptyIsNormal сообщает, что пустой ответ (NOERROR без записей) для данного
-// типа запроса — штатная ситуация, а не признак подмены или сбоя резолвера.
-func emptyIsNormal(qtype string) bool {
-	switch qtype {
-	case "AAAA", "HTTPS", "SVCB":
-		return true
-	}
-	return false
 }
 
 // normalize приводит имя к каноническому виду: нижний регистр без завершающей

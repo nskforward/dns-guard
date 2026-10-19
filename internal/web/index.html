@@ -384,10 +384,11 @@ async function loadStats() {
     const d = await r.json();
     document.getElementById('c-total').textContent = fmt(d.total);
     document.getElementById('c-hits').textContent = fmt(d.cache_hits);
-    // Bad answers — все проблемные ответы: ошибки (bad), SERVFAIL, NXDOMAIN и
-    // NODATA. Совпадает с фильтром bad=1 и красным крестом в таблице доменов.
+    // Bad answers — все проблемные ответы: ошибки (bad), SERVFAIL и NXDOMAIN.
+    // NODATA (NOERROR без записей) штатен для любого типа запроса и сюда не
+    // входит. Совпадает с фильтром bad=1 и красным крестом в таблице доменов.
     const bd = document.getElementById('c-bad');
-    const badTotal = (d.bad || 0) + (d.servfail || 0) + (d.nxdomain || 0) + (d.nodata || 0);
+    const badTotal = (d.bad || 0) + (d.servfail || 0) + (d.nxdomain || 0);
     bd.textContent = fmt(badTotal);
     bd.classList.toggle('err', badTotal > 0);
     const rate = d.total ? Math.round(d.cache_hits * 100 / d.total) : 0;
@@ -567,8 +568,8 @@ function showBlocked() {
 }
 
 // showBad — клик по карточке Bad answers: домены, у которых хотя бы один тип
-// запроса имеет проблемный последний ответ (bad, SERVFAIL, NXDOMAIN, NODATA).
-// Повторный клик сбрасывает фильтр.
+// запроса имеет проблемный последний ответ (bad, SERVFAIL, NXDOMAIN).
+// NODATA любого типа проблемным не считается. Повторный клик сбрасывает фильтр.
 function showBad() {
   setDomainFilter(domainFilter === 'bad' ? 'all' : 'bad');
 }
@@ -805,29 +806,27 @@ function renderAnswer(last) {
 
   const when = fmtTime(last.at);
   const blocked = !!last.blocked;
-  // NODATA для AAAA/HTTPS/SVCB — штатный ответ (у домена может не быть
-  // IPv6- или HTTPS/SVCB-записей), поэтому он не считается проблемой.
-  const emptyIsNormal = last.rcode === 'NOERROR' &&
-    ['AAAA', 'HTTPS', 'SVCB'].indexOf(last.qtype) !== -1;
-  const ok = last.rcode === 'NOERROR' &&
-    (!!(last.records && last.records.length) || emptyIsNormal);
+  // NODATA (NOERROR без записей) — штатный ответ для любого типа: у домена
+  // может не быть записей этого типа. Он не считается проблемой.
+  const nodata = last.rcode === 'NOERROR' && !(last.records && last.records.length);
+  const ok = last.rcode === 'NOERROR';
   const rows = [
     ['Status', blocked || !ok ? 'Bad' : 'OK', blocked || !ok ? 'rcode-err' : 'rcode-ok'],
   ];
   if (blocked) {
     rows.push(['Reason', 'BLOCKED', 'rcode-err']);
+  } else if (nodata) {
+    // Пустой NOERROR показываем отдельной причиной, хотя статус — OK.
+    rows.push(['Reason', 'NODATA', 'rcode-warn']);
   } else if (!ok) {
-    // Тот же разбор, что и в таблице: NODATA — NOERROR без записей,
-    // NXDOMAIN и SERVFAIL — проблемные ответы, timeout/error — сбой запроса.
+    // Тот же разбор, что и в таблице: NXDOMAIN и SERVFAIL — проблемные
+    // ответы, timeout/error — сбой запроса.
     let reason = last.rcode || '—';
     let cls = 'rcode-err';
     if (last.timeout) {
       reason = 'Timeout';
     } else if (last.error) {
       reason = last.error;
-    } else if (last.rcode === 'NOERROR') {
-      reason = 'NODATA';
-      cls = 'rcode-warn';
     }
     rows.push(['Reason', reason, cls]);
   }

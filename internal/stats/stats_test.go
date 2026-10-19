@@ -714,7 +714,7 @@ func TestDomainStatus(t *testing.T) {
 
 	// Разные типы запросов к одному домену — одна строка с бейджами по типам;
 	// последний ответ одного типа не меняет статус другого. NODATA для AAAA
-	// показывает бейдж nodata (жёлтый), хотя для фильтра bad=1 он штатный.
+	// показывает бейдж nodata (жёлтый), но проблемным ответом не считается.
 	now = time.Unix(40, 0)
 	s.Record("multi.test.", "g", false, &AnswerInfo{
 		Rcode: "NOERROR", Qtype: "A", Records: []string{"multi.test. 60 IN A 1.1.1.1"},
@@ -813,42 +813,42 @@ func TestDomainsPagePerType(t *testing.T) {
 	}
 }
 
-// TestNoDataNormalTypes проверяет, что NODATA для AAAA/HTTPS/SVCB — штатный
-// ответ: он не считается проблемным, не попадает в счётчик nodata и в фильтр
-// bad=1, но на бейдже показывается как nodata и по-прежнему хранится как
-// негативный по типу (виден в карточке).
+// TestNoDataNormalTypes проверяет, что NODATA для любого типа запроса —
+// штатный ответ: он не считается проблемным и не попадает в фильтр bad=1, но
+// учитывается в счётчике nodata, на бейдже показывается как nodata (жёлтый) и
+// по-прежнему хранится как негативный по типу (виден в карточке).
 func TestNoDataNormalTypes(t *testing.T) {
 	s := New(0)
 	cases := []struct{ qtype, domain string }{
-		{"AAAA", "aaaa.test"},
-		{"HTTPS", "https.test"},
-		{"SVCB", "svcb.test"},
+		{"A", "qtype-a.test"},
+		{"AAAA", "qtype-aaaa.test"},
+		{"HTTPS", "qtype-https.test"},
+		{"SVCB", "qtype-svcb.test"},
 	}
 	for _, tc := range cases {
 		s.Record(tc.domain+".", "g", false, &AnswerInfo{Rcode: "NOERROR", Qtype: tc.qtype})
 	}
-	// NODATA для A остаётся проблемным ответом.
-	s.Record("a.test.", "g", false, &AnswerInfo{Rcode: "NOERROR", Qtype: "A"})
 
 	for _, tc := range cases {
 		page := s.DomainsPage(1, 0, tc.domain, false, false, "", nil)
-		if len(page.Items) != 1 || page.Items[0].Status != "ok" {
-			t.Fatalf("%s status = %+v, want ok", tc.qtype, page.Items)
+		if len(page.Items) != 1 || page.Items[0].Status != "nodata" {
+			t.Fatalf("%s status = %+v, want nodata", tc.qtype, page.Items)
 		}
-		// На бейдже тип всё равно помечен как nodata: записи этого типа нет.
+		// На бейдже тип всё равно помечен как nodata: записи этого типа нет,
+		// но это не проблема.
 		if len(page.Items[0].Types) != 1 || page.Items[0].Types[0].Status != "nodata" {
 			t.Fatalf("%s badge = %+v, want nodata", tc.qtype, page.Items[0].Types)
 		}
 	}
-	if got := s.Snapshot().Nodata; got != 1 {
-		t.Fatalf("nodata = %d, want 1 (только A)", got)
+	if got := s.Snapshot().Nodata; got != uint64(len(cases)) {
+		t.Fatalf("nodata = %d, want %d", got, len(cases))
 	}
 	bad := s.DomainsPage(1, 0, "", false, true, "", nil)
-	if bad.Total != 1 || bad.Items[0].Domain != "a.test" {
-		t.Fatalf("bad=1 page = %+v", bad)
+	if bad.Total != 0 || len(bad.Items) != 0 {
+		t.Fatalf("bad=1 page = %+v, want empty", bad)
 	}
 	// Ответ по-прежнему виден в карточке домена как негативный по типу.
-	di, ok := s.DomainInfo("https.test")
+	di, ok := s.DomainInfo("qtype-https.test")
 	if !ok || len(di.Negative) != 1 || di.Negative[0].Qtype != "HTTPS" {
 		t.Fatalf("https domain info = %+v", di)
 	}
@@ -889,7 +889,7 @@ func TestDomainsPageStatusFilter(t *testing.T) {
 	}
 
 	// bad=1 оставляет домены, у которых хотя бы один тип запроса имеет
-	// проблемный последний ответ (bad/servfail/nxdomain/nodata), но не ok,
+	// проблемный последний ответ (bad/servfail/nxdomain), но не ok,
 	// не blocked и не пустые.
 	badOnly := s.DomainsPage(1, 0, "", false, true, "", isBlocked)
 	if badOnly.Total != 2 || len(badOnly.Items) != 2 ||

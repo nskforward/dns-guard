@@ -422,14 +422,19 @@ func TestServeDNSNoDataHTTPSNotBad(t *testing.T) {
 	}
 
 	di, ok := ss.DomainInfo("example.com")
-	if !ok || di.Status != "ok" {
-		t.Fatalf("domain status = %+v, want ok", di)
+	if !ok || di.Status != "nodata" {
+		t.Fatalf("domain status = %+v, want nodata", di)
 	}
 	if len(di.Negative) != 1 || len(di.Negative[0].Attempts) != 2 {
 		t.Fatalf("negative = %+v", di.Negative)
 	}
-	if got := ss.Snapshot().Nodata; got != 0 {
-		t.Fatalf("nodata counter = %d, want 0", got)
+	// NODATA любого типа учитывается в счётчике, но не считается плохим
+	// ответом: в bad=1 такой домен не попадает.
+	if got := ss.Snapshot().Nodata; got != 1 {
+		t.Fatalf("nodata counter = %d, want 1", got)
+	}
+	if got := ss.Snapshot().Bad; got != 0 {
+		t.Fatalf("bad counter = %d, want 0", got)
 	}
 
 	// Ответ закэширован с MIN-TTL (60s), несмотря на SOA minttl = 30s.

@@ -113,7 +113,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 // GET /api/domains?page=1&limit=50&search=строка&blocked=1&bad=1&status=bad
 // blocked=1 оставляет только заблокированные домены; bad=1 — только домены,
 // у которых хотя бы один тип запроса имеет проблемный последний ответ
-// (bad/servfail/nxdomain/nodata); status фильтрует по точному статусу
+// (bad/servfail/nxdomain); status фильтрует по точному статусу
 // последнего ответа домена или одного из его типов
 // (ok/servfail/nxdomain/nodata/blocked/bad).
 func (s *Server) handleDomains(w http.ResponseWriter, r *http.Request) {
