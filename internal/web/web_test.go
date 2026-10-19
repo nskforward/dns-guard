@@ -74,8 +74,13 @@ func TestDomainsAPI(t *testing.T) {
 	if page.Items[0].Status != "ok" {
 		t.Fatalf("status = %q, want ok", page.Items[0].Status)
 	}
+	if len(page.Items[0].Types) != 1 || page.Items[0].Types[0].Type != "A" ||
+		page.Items[0].Types[0].Status != "ok" {
+		t.Fatalf("types = %+v", page.Items[0].Types)
+	}
 
-	// bad=1 оставляет только домены с проблемным последним ответом.
+	// bad=1 оставляет только домены, у которых хотя бы один тип запроса
+	// имеет проблемный последний ответ.
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/domains?bad=1", nil))
 	if rec.Code != http.StatusOK {
@@ -408,7 +413,8 @@ func TestBlockAPI(t *testing.T) {
 }
 
 // TestDomainsStatusFilterAPI проверяет фильтр status=bad в /api/domains:
-// в ответ попадают только домены с плохим последним ответом.
+// в ответ попадают только домены, у которых хотя бы один тип запроса имеет
+// плохой последний ответ.
 func TestDomainsStatusFilterAPI(t *testing.T) {
 	st := stats.New(0)
 	st.Record("ok.test.", "g", false, &stats.AnswerInfo{

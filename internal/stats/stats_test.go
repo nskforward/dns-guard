@@ -712,9 +712,9 @@ func TestDomainStatus(t *testing.T) {
 		t.Fatalf("flip after recovery = %q", got)
 	}
 
-	// Разные типы запросов к одному домену — отдельные строки со своим
-	// статусом; последний ответ одного типа не меняет статус другого.
-	// NODATA для AAAA — штатный ответ, поэтому строка AAAA получает статус ok.
+	// Разные типы запросов к одному домену — одна строка с бейджами по типам;
+	// последний ответ одного типа не меняет статус другого. NODATA для AAAA
+	// показывает бейдж nodata (жёлтый), хотя для фильтра bad=1 он штатный.
 	now = time.Unix(40, 0)
 	s.Record("multi.test.", "g", false, &AnswerInfo{
 		Rcode: "NOERROR", Qtype: "A", Records: []string{"multi.test. 60 IN A 1.1.1.1"},
@@ -726,15 +726,19 @@ func TestDomainStatus(t *testing.T) {
 		Rcode: "NOERROR", Qtype: "A", Records: []string{"multi.test. 60 IN A 2.2.2.2"},
 	})
 	multi := s.DomainsPage(1, 0, "multi.test", false, false, "", nil)
-	if len(multi.Items) != 2 {
+	if len(multi.Items) != 1 {
 		t.Fatalf("multi rows = %+v", multi.Items)
 	}
 	byType := map[string]string{}
-	for _, it := range multi.Items {
+	for _, it := range multi.Items[0].Types {
 		byType[it.Type] = it.Status
 	}
-	if byType["A"] != "ok" || byType["AAAA"] != "ok" {
-		t.Fatalf("per-type status = %v, want A=ok AAAA=ok", byType)
+	if byType["A"] != "ok" || byType["AAAA"] != "nodata" {
+		t.Fatalf("per-type status = %v, want A=ok AAAA=nodata", byType)
+	}
+	// Общий статус строки — последний ответ любого типа (A).
+	if multi.Items[0].Status != "ok" {
+		t.Fatalf("domain status = %q, want ok", multi.Items[0].Status)
 	}
 
 	// Домен, заблокированный сейчас, получает статус blocked даже если
@@ -752,8 +756,8 @@ func TestDomainStatus(t *testing.T) {
 }
 
 // TestDomainsPagePerType проверяет, что запросы разных типов к одному домену
-// дают отдельные строки со своими счётчиками и статусами, а карточка домена
-// показывает успешные ответы по типам, не смешивая их.
+// дают одну строку с бейджами типов и суммарными счётчиками, а карточка
+// домена показывает успешные ответы по типам, не смешивая их.
 func TestDomainsPagePerType(t *testing.T) {
 	s := New(0)
 	s.Record("mdm.example.com.", "g", false, &AnswerInfo{
@@ -769,16 +773,23 @@ func TestDomainsPagePerType(t *testing.T) {
 	})
 
 	page := s.DomainsPage(1, 0, "mdm.example.com", false, false, "", nil)
-	if page.Total != 2 || len(page.Items) != 2 {
+	if page.Total != 1 || len(page.Items) != 1 {
 		t.Fatalf("page = %+v", page)
 	}
-	// Сортировка по числу запросов: A (2) выше HTTPS (1).
-	a, https := page.Items[0], page.Items[1]
-	if a.Type != "A" || a.Total != 2 || a.CacheHits != 1 || a.Status != "ok" {
-		t.Fatalf("A row = %+v", a)
+	item := page.Items[0]
+	if item.Domain != "mdm.example.com" || item.Total != 3 || item.CacheHits != 1 || item.Status != "ok" {
+		t.Fatalf("domain row = %+v", item)
 	}
-	if https.Type != "HTTPS" || https.Total != 1 || https.Status != "ok" {
-		t.Fatalf("HTTPS row = %+v", https)
+	if len(item.Types) != 2 {
+		t.Fatalf("types = %+v", item.Types)
+	}
+	// Бейджи сортируются по числу запросов: A (2) выше HTTPS (1).
+	a, https := item.Types[0], item.Types[1]
+	if a.Type != "A" || a.Total != 2 || a.CacheHits != 1 || a.Status != "ok" {
+		t.Fatalf("A badge = %+v", a)
+	}
+	if https.Type != "HTTPS" || https.Total != 1 || https.Status != "nodata" {
+		t.Fatalf("HTTPS badge = %+v", https)
 	}
 
 	// NODATA по HTTPS — штатный ответ, поэтому в bad-фильтр он не попадает.
@@ -804,7 +815,8 @@ func TestDomainsPagePerType(t *testing.T) {
 
 // TestNoDataNormalTypes проверяет, что NODATA для AAAA/HTTPS/SVCB — штатный
 // ответ: он не считается проблемным, не попадает в счётчик nodata и в фильтр
-// bad=1, но по-прежнему хранится как негативный по типу (виден в карточке).
+// bad=1, но на бейдже показывается как nodata и по-прежнему хранится как
+// негативный по типу (виден в карточке).
 func TestNoDataNormalTypes(t *testing.T) {
 	s := New(0)
 	cases := []struct{ qtype, domain string }{
@@ -822,6 +834,10 @@ func TestNoDataNormalTypes(t *testing.T) {
 		page := s.DomainsPage(1, 0, tc.domain, false, false, "", nil)
 		if len(page.Items) != 1 || page.Items[0].Status != "ok" {
 			t.Fatalf("%s status = %+v, want ok", tc.qtype, page.Items)
+		}
+		// На бейдже тип всё равно помечен как nodata: записи этого типа нет.
+		if len(page.Items[0].Types) != 1 || page.Items[0].Types[0].Status != "nodata" {
+			t.Fatalf("%s badge = %+v, want nodata", tc.qtype, page.Items[0].Types)
 		}
 	}
 	if got := s.Snapshot().Nodata; got != 1 {
@@ -872,12 +888,43 @@ func TestDomainsPageStatusFilter(t *testing.T) {
 		t.Fatalf("status=blocked page = %+v", blocked)
 	}
 
-	// bad=1 оставляет домены с любым проблемным последним ответом
-	// (bad/servfail/nxdomain/nodata), но не ok, не blocked и не пустые.
+	// bad=1 оставляет домены, у которых хотя бы один тип запроса имеет
+	// проблемный последний ответ (bad/servfail/nxdomain/nodata), но не ok,
+	// не blocked и не пустые.
 	badOnly := s.DomainsPage(1, 0, "", false, true, "", isBlocked)
 	if badOnly.Total != 2 || len(badOnly.Items) != 2 ||
 		badOnly.Items[0].Domain != "bad.test" || badOnly.Items[1].Domain != "fail.test" {
 		t.Fatalf("bad=1 page = %+v", badOnly)
+	}
+}
+
+// TestDomainsPageMixedTypesBadFilter проверяет, что bad=1 оставляет домен,
+// у которого проблемный ответ есть хотя бы у одного типа, даже если
+// хронологически последний ответ домена успешен.
+func TestDomainsPageMixedTypesBadFilter(t *testing.T) {
+	s := New(0)
+	s.Record("mixed.test.", "g", false, &AnswerInfo{
+		Rcode: "NOERROR", Qtype: "A", Records: []string{"mixed.test. 60 IN A 1.2.3.4"},
+	})
+	s.Record("mixed.test.", "g", false, &AnswerInfo{Rcode: "SERVFAIL", Qtype: "HTTPS"})
+	// Последний ответ домена снова успешный — общий статус ok.
+	s.Record("mixed.test.", "g", false, &AnswerInfo{
+		Rcode: "NOERROR", Qtype: "A", Records: []string{"mixed.test. 60 IN A 1.2.3.4"},
+	})
+
+	page := s.DomainsPage(1, 0, "mixed.test", false, true, "", nil)
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].Domain != "mixed.test" {
+		t.Fatalf("bad page = %+v", page)
+	}
+	if page.Items[0].Status != "ok" {
+		t.Fatalf("domain status = %q, want ok", page.Items[0].Status)
+	}
+	byType := map[string]string{}
+	for _, ts := range page.Items[0].Types {
+		byType[ts.Type] = ts.Status
+	}
+	if byType["A"] != "ok" || byType["HTTPS"] != "servfail" {
+		t.Fatalf("types = %v, want A=ok HTTPS=servfail", byType)
 	}
 }
 

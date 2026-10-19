@@ -50,7 +50,15 @@
   tr.clickable:hover td, tr.group-row:hover td { background:rgba(79,156,249,.08); }
   tr.clickable:active td, tr.group-row:active td { background:rgba(79,156,249,.14); }
   td.domain { word-break:break-all; }
-  td.qtype { width:1%; white-space:nowrap; color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  td.qtype { width:1%; white-space:nowrap; }
+  /* Типы запросов домена: кликабельные бейджи, цвет — статус последнего ответа. */
+  .qbadges { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+  button.qbadge { display:inline-flex; align-items:center; justify-content:center; min-height:24px; padding:2px 9px; border:1px solid currentColor; border-radius:999px; background:transparent; color:var(--muted); font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+  button.qbadge:hover { filter:brightness(1.25); }
+  button.qbadge:active { filter:brightness(.85); }
+  button.qbadge.ok { color:var(--ok); background:rgba(63,185,80,.12); }
+  button.qbadge.warn { color:var(--warn); background:rgba(210,153,34,.12); }
+  button.qbadge.err { color:var(--err); background:rgba(248,81,73,.12); }
   /* Last-answer status: green check / red cross */
   td.st { width:1%; text-align:center; white-space:nowrap; }
   td.st svg { width:18px; height:18px; vertical-align:middle; }
@@ -162,8 +170,10 @@
     tbody td.domain, tbody td.name { grid-column:1/-1; font-weight:600; word-break:break-all; padding-right:34px; }
     tbody td.blk { position:absolute; top:8px; right:8px; width:auto; }
     tbody td.num { display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
-    tbody td.qtype { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    tbody td.qtype { grid-column:1/-1; display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
     tbody td.qtype::before { content:attr(data-label); color:var(--muted); font-size:12px; flex:none; }
+    .qbadges { gap:8px; }
+    button.qbadge { min-height:32px; padding:4px 12px; font-size:13px; }
     tbody td.st { display:flex; align-items:center; justify-content:space-between; gap:8px; }
     tbody td.st::before { content:attr(data-label); color:var(--muted); font-size:12px; flex:none; }
     tbody td.num::before, tbody td.kv::before, tbody td.wide::before { content:attr(data-label); color:var(--muted); font-size:12px; flex:none; }
@@ -235,7 +245,7 @@
   <section id="view-dash">
     <div class="cards">
       <div class="card clickable" id="card-all" onclick="showAll()" title="Show all domains"><div class="k">All requests</div><div class="v" id="c-total">—</div></div>
-      <div class="card clickable" id="card-bad" onclick="showBad()" title="Show only domains with a bad last answer"><div class="k">Bad answers</div><div class="v" id="c-bad">—</div></div>
+      <div class="card clickable" id="card-bad" onclick="showBad()" title="Show only domains with at least one bad answer"><div class="k">Bad answers</div><div class="v" id="c-bad">—</div></div>
       <div class="card"><div class="k">Cache hits</div><div class="v" id="c-hits">—</div></div>
       <div class="card"><div class="k">Hit rate</div><div class="v" id="c-rate">—</div></div>
       <div class="card clickable" id="card-blocked" onclick="showBlocked()" title="Show only blocked domains"><div class="k">Blocked</div><div class="v" id="c-blocked">—</div></div>
@@ -423,16 +433,17 @@ function renderRows(items) {
     td.colSpan = 7;
     td.className = 'empty muted';
     td.textContent = domainFilter === 'blocked' ? 'No blocked domains'
-      : domainFilter === 'bad' ? 'No domains with a bad last answer'
+      : domainFilter === 'bad' ? 'No domains with bad answers'
       : search ? 'Nothing found' : 'No data yet';
     tr.appendChild(td);
     body.appendChild(tr);
     return;
   }
   items.forEach((x, i) => {
+    // Одна строка — один домен. Клик по строке ничего не открывает: детали
+    // доступны по клику на бейдж конкретного типа запроса.
     const tr = document.createElement('tr');
-    tr.className = 'clickable' + (x.blocked ? ' blocked' : '');
-    tr.title = 'Show last answer';
+    tr.className = x.blocked ? 'blocked' : '';
     tr.innerHTML = '<td class="idx muted">' + ((page - 1) * PAGE_SIZE + i + 1) + '</td>' +
       '<td class="domain" data-label="Domain"></td>' +
       '<td class="qtype" data-label="Type"></td>' +
@@ -440,14 +451,57 @@ function renderRows(items) {
       '<td class="num" data-label="Requests">' + fmt(x.total) + '</td>' +
       '<td class="num" data-label="Cache hits">' + fmt(x.cache_hits) + '</td>';
     tr.children[1].textContent = x.domain;
-    tr.children[2].textContent = x.type || '—';
+    tr.replaceChild(typeCell(x), tr.children[2]);
     tr.replaceChild(statusCell(x), tr.children[3]);
     tr.appendChild(blockCell(x));
-    // Каждая строка — отдельная пара (домен, тип): модальное окно открывается
-    // только для неё и не смешивает ответы разных типов.
-    tr.addEventListener('click', () => showDomain(x.domain, x.type || ''));
     body.appendChild(tr);
   });
+}
+
+// typeCell — бейджи типов запросов, которые встречались у домена. Клик по
+// бейджу открывает модальное окно только для пары (домен, тип).
+function typeCell(x) {
+  const td = document.createElement('td');
+  td.className = 'qtype';
+  td.dataset.label = 'Type';
+  const types = x.types || [];
+  if (!types.length) {
+    td.classList.add('muted');
+    td.textContent = '—';
+    return td;
+  }
+  const wrap = document.createElement('div');
+  wrap.className = 'qbadges';
+  types.forEach(t => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'qbadge ' + badgeClass(t.status);
+    b.textContent = t.type;
+    b.title = t.type + ': ' + badgeStatusLabel(t.status) +
+      ' · ' + fmt(t.total) + ' requests, ' + fmt(t.cache_hits) + ' cache hits';
+    b.addEventListener('click', e => {
+      e.stopPropagation();
+      showDomain(x.domain, t.type);
+    });
+    wrap.appendChild(b);
+  });
+  td.appendChild(wrap);
+  return td;
+}
+
+// badgeClass сопоставляет статус последнего ответа типа цвету бейджа:
+// зелёный — успешный ответ, жёлтый — NODATA, красный — негативный/ошибка.
+function badgeClass(status) {
+  if (status === 'ok') return 'ok';
+  if (status === 'nodata') return 'warn';
+  return 'err';
+}
+
+function badgeStatusLabel(status) {
+  return ({
+    ok: 'OK', nodata: 'NODATA', nxdomain: 'NXDOMAIN',
+    servfail: 'SERVFAIL', bad: 'error', blocked: 'blocked',
+  })[status] || status || 'no answer';
 }
 
 // statusCell — иконка состояния последнего ответа домена: зелёная галка при
@@ -548,8 +602,9 @@ function showBlocked() {
   setDomainFilter(domainFilter === 'blocked' ? 'all' : 'blocked');
 }
 
-// showBad — клик по карточке Bad answers: домены с проблемным последним
-// ответом (bad, SERVFAIL, NXDOMAIN, NODATA). Повторный клик сбрасывает фильтр.
+// showBad — клик по карточке Bad answers: домены, у которых хотя бы один тип
+// запроса имеет проблемный последний ответ (bad, SERVFAIL, NXDOMAIN, NODATA).
+// Повторный клик сбрасывает фильтр.
 function showBad() {
   setDomainFilter(domainFilter === 'bad' ? 'all' : 'bad');
 }

@@ -1,6 +1,6 @@
 // Package stats собирает статистику обработанных DNS-запросов: общие счётчики,
-// распределение по группам апстримов и по парам (домен, тип запроса). Для
-// каждой пары хранится информация о последнем выданном ответе.
+// распределение по группам апстримов и по доменам с разбивкой по типам
+// запросов. Для каждого типа хранится информация о последнем выданном ответе.
 //
 // Память на домен — O(1) по числу типов запросов, фоновых горутин нет. Число
 // уникальных доменов ограничено maxDomains, число типов на домен —
@@ -31,16 +31,35 @@ const (
 	maxAnswersPerDomain = 8
 )
 
-// DomainStat — строка таблицы статистики: одна пара (домен, тип запроса).
+// TypeStat — сводка одного типа запроса внутри домена: счётчики этого типа и
+// состояние его последнего ответа. Используется для бейджей в таблице доменов.
+type TypeStat struct {
+	Type string `json:"type"`
+	// Status — состояние последнего ответа на запросы этого типа: "ok",
+	// "nodata" (NOERROR без записей, в том числе для AAAA/HTTPS/SVCB),
+	// "servfail"/"nxdomain"/"bad"/"blocked".
+	Status    string `json:"status,omitempty"`
+	Total     uint64 `json:"total"`
+	CacheHits uint64 `json:"cache_hits"`
+}
+
+// DomainStat — строка таблицы статистики: один домен со всеми встреченными
+// типами запросов.
 type DomainStat struct {
 	Domain string `json:"domain"`
-	// Type — тип запроса (A, AAAA, HTTPS, ...). Пусто, если запрос учтён без
-	// сведений о типе.
+	// Type — тип запроса. Заполняется только в ответе /api/domain с параметром
+	// type (модальное окно одной пары «домен, тип»); в списке /api/domains не
+	// используется — там все типы домена перечислены в Types.
 	Type string `json:"type,omitempty"`
-	// Status — состояние хронологически последнего ответа на запросы этого
-	// типа: "ok" для успешного ответа, "servfail"/"nxdomain"/"nodata"/"blocked"/
-	// "bad" для проблемного, пусто — если ответов ещё не было.
-	Status    string `json:"status,omitempty"`
+	// Types — типы запросов, которые встречались у домена (без повторов),
+	// по убыванию числа запросов. Пусто, если запросы учтены без сведений о
+	// типе.
+	Types []TypeStat `json:"types,omitempty"`
+	// Status — состояние хронологически последнего ответа домена (любого
+	// типа): "ok" для успешного ответа, "servfail"/"nxdomain"/"nodata"/
+	// "blocked"/"bad" для проблемного, пусто — если ответов ещё не было.
+	Status string `json:"status,omitempty"`
+	// Total и CacheHits — суммы по всем типам запросов домена.
 	Total     uint64 `json:"total"`
 	CacheHits uint64 `json:"cache_hits"`
 	// Blocked — домен (или его родитель) в блоклисте. BlockedBy — запись
@@ -515,17 +534,21 @@ func (s *Stats) UpstreamsPage() []GroupStat {
 	return out
 }
 
-// DomainsPage возвращает страницу строк статистики: по одной строке на каждую
-// пару (домен, тип запроса), отсортированных по числу запросов. search —
-// подстрока имени без учёта регистра (пустая — все домены). page нумеруется с
-// единицы; size по умолчанию DefaultPageSize и не больше MaxPageSize.
+// DomainsPage возвращает страницу строк статистики: по одной строке на домен,
+// отсортированных по числу запросов. В Types у каждой строки перечислены типы
+// запросов, которые встречались у домена, — по одному элементу на тип, без
+// повторов. search — подстрока имени без учёта регистра (пустая — все домены).
+// page нумеруется с единицы; size по умолчанию DefaultPageSize и не больше
+// MaxPageSize.
 //
 // isBlocked (может быть nil) проставляет в элементах Blocked/BlockedBy;
 // blockedOnly оставляет только строки заблокированных доменов;
-// badOnly оставляет только строки с проблемным последним ответом
-// (bad/servfail/nxdomain/nodata), исключая ok, blocked и строки без ответов.
-// status (пустая строка — без фильтра) оставляет только строки с указанным
-// статусом последнего ответа: ok, servfail, nxdomain, nodata, blocked или bad.
+// badOnly оставляет домены, у которых хотя бы один тип запроса имеет
+// проблемный последний ответ (bad/servfail/nxdomain/nodata), исключая ok,
+// blocked и строки без ответов. NODATA для AAAA/HTTPS/SVCB проблемным не
+// считается. status (пустая строка — без фильтра) оставляет домены, у которых
+// статус последнего ответа домена или любого его типа равен указанному:
+// ok, servfail, nxdomain, nodata, blocked или bad.
 func (s *Stats) DomainsPage(page, size int, search string, blockedOnly, badOnly bool, status string, isBlocked func(string) (string, bool)) DomainsPage {
 	if size <= 0 {
 		size = DefaultPageSize
@@ -552,53 +575,57 @@ func (s *Stats) DomainsPage(page, size int, search string, blockedOnly, badOnly 
 		if blockedOnly && !blocked {
 			continue
 		}
-		// Строки по типам запросов. Если ответы учтены без сведений о типе
-		// (info == nil), показываем одну строку без Type, чтобы домен не
-		// пропадал из таблицы.
-		if len(d.types) == 0 {
-			st := DomainStat{
-				Domain:    name,
-				Status:    statusOf(d.last),
-				Total:     d.total,
-				CacheHits: d.hits,
-				Blocked:   blocked,
-				BlockedBy: entry,
-			}
-			if blocked {
-				st.Status = "blocked"
-			}
-			if badOnly && !isBadStatus(st.Status) {
-				continue
-			}
-			if status != "" && st.Status != status {
-				continue
-			}
-			out = append(out, st)
-			continue
+
+		st := DomainStat{
+			Domain:    name,
+			Status:    statusOf(d.last),
+			Total:     d.total,
+			CacheHits: d.hits,
+			Blocked:   blocked,
+			BlockedBy: entry,
+		}
+		if blocked {
+			// Домен заблокирован прямо сейчас: статус важнее последнего
+			// сохранённого ответа.
+			st.Status = "blocked"
+		}
+		// Один бейдж на каждый тип, который встречался у домена. Пустой тип
+		// (запросы без сведений о qtype) бейджа не получает: подписать его
+		// нечем, а домен уже представлен строкой таблицы.
+		if len(d.types) > 0 {
+			st.Types = make([]TypeStat, 0, len(d.types))
 		}
 		for qtype, ts := range d.types {
-			st := DomainStat{
-				Domain:    name,
+			if qtype == "" {
+				continue
+			}
+			tst := TypeStat{
 				Type:      qtype,
-				Status:    statusOf(ts.last),
+				Status:    typeStatusOf(ts.last),
 				Total:     ts.total,
 				CacheHits: ts.hits,
-				Blocked:   blocked,
-				BlockedBy: entry,
 			}
 			if blocked {
-				// Домен заблокирован прямо сейчас: статус важнее последнего
-				// сохранённого ответа по типу.
-				st.Status = "blocked"
+				// Блокировка — вердикт домена целиком, поэтому все его типы
+				// показываются красным, как и раньше в построчной таблице.
+				tst.Status = "blocked"
 			}
-			if badOnly && !isBadStatus(st.Status) {
-				continue
-			}
-			if status != "" && st.Status != status {
-				continue
-			}
-			out = append(out, st)
+			st.Types = append(st.Types, tst)
 		}
+		sort.Slice(st.Types, func(i, j int) bool {
+			if st.Types[i].Total != st.Types[j].Total {
+				return st.Types[i].Total > st.Types[j].Total
+			}
+			return st.Types[i].Type < st.Types[j].Type
+		})
+
+		if badOnly && !domainIsBad(st) {
+			continue
+		}
+		if status != "" && !domainHasStatus(st, status) {
+			continue
+		}
+		out = append(out, st)
 	}
 	s.mu.Unlock()
 
@@ -606,10 +633,7 @@ func (s *Stats) DomainsPage(page, size int, search string, blockedOnly, badOnly 
 		if out[i].Total != out[j].Total {
 			return out[i].Total > out[j].Total
 		}
-		if out[i].Domain != out[j].Domain {
-			return out[i].Domain < out[j].Domain
-		}
-		return out[i].Type < out[j].Type
+		return out[i].Domain < out[j].Domain
 	})
 
 	total := len(out)
@@ -800,6 +824,34 @@ func domainStat(name string, d *domain) DomainStat {
 	}
 }
 
+// domainIsBad сообщает, что хотя бы один тип запроса домена имеет проблемный
+// последний ответ. Для доменов без сведений о типе используется общий статус.
+func domainIsBad(st DomainStat) bool {
+	if len(st.Types) == 0 {
+		return isBadStatus(st.Status)
+	}
+	for _, t := range st.Types {
+		if typeIsBad(t.Type, t.Status) {
+			return true
+		}
+	}
+	return false
+}
+
+// domainHasStatus сообщает, что общий статус домена или статус одного из его
+// типов запроса совпадает с указанным.
+func domainHasStatus(st DomainStat, status string) bool {
+	if st.Status == status {
+		return true
+	}
+	for _, t := range st.Types {
+		if t.Status == status {
+			return true
+		}
+	}
+	return false
+}
+
 // isBadStatus сообщает, что статус последнего ответа считается проблемным:
 // ошибка, SERVFAIL, NXDOMAIN или NODATA. ok, blocked и пустой статус
 // проблемными не считаются.
@@ -809,6 +861,39 @@ func isBadStatus(status string) bool {
 		return true
 	}
 	return false
+}
+
+// typeIsBad сообщает, считается ли статус типа проблемным для фильтра bad=1.
+// NODATA для AAAA/HTTPS/SVCB — штатный ответ и проблемой не считается, хотя
+// на бейдже показывается жёлтым (записи этого типа у домена нет).
+func typeIsBad(qtype, status string) bool {
+	if status == "nodata" && emptyIsNormal(qtype) {
+		return false
+	}
+	return isBadStatus(status)
+}
+
+// typeStatusOf классифицирует последний ответ на запросы одного типа для
+// бейджа в таблице доменов. В отличие от statusOf, NODATA (NOERROR без
+// записей) для любого типа, включая AAAA/HTTPS/SVCB, получает статус
+// "nodata": бейдж показывает, что записи этого типа у домена нет.
+func typeStatusOf(a *AnswerInfo) string {
+	switch {
+	case a == nil:
+		return ""
+	case a.Blocked:
+		return "blocked"
+	case a.Rcode == "SERVFAIL":
+		return "servfail"
+	case a.Rcode == "NXDOMAIN":
+		return "nxdomain"
+	case a.successful():
+		return "ok"
+	case a.Rcode == "NOERROR":
+		return "nodata"
+	default:
+		return "bad"
+	}
 }
 
 // statusOf классифицирует последний ответ домена для колонки Status.
