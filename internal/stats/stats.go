@@ -51,8 +51,13 @@ type DomainStat struct {
 
 // AnswerInfo — сведения о последнем ответе, выданном по домену.
 type AnswerInfo struct {
-	Rcode      string        `json:"rcode"`
-	Qtype      string        `json:"qtype,omitempty"`
+	Rcode string `json:"rcode"`
+	Qtype string `json:"qtype,omitempty"`
+	// Total и CacheHits — счётчики запросов этого типа на момент сборки
+	// DomainInfo (0 при передаче ответа в Record). В карточке домена каждая
+	// запись (домен, тип) показывает свои цифры, а не сумму по всем типам.
+	Total      uint64        `json:"total"`
+	CacheHits  uint64        `json:"cache_hits"`
 	Records    []string      `json:"records,omitempty"`   // секция Answer
 	Authority  []string      `json:"authority,omitempty"` // секция Ns (обычно SOA)
 	Error      string        `json:"error,omitempty"`
@@ -650,6 +655,23 @@ func (s *Stats) DomainInfo(name string) (DomainInfo, bool) {
 	}
 	if len(d.negative) > 0 {
 		info.Negative = latestByQtype(d.negative)
+	}
+	// Счётчики каждой записи — из её типа запроса: карточка (домен, тип)
+	// показывает те же Total/CacheHits, что и строка таблицы доменов.
+	fillCounts := func(a *AnswerInfo) {
+		if ts := d.types[a.Qtype]; ts != nil {
+			a.Total = ts.total
+			a.CacheHits = ts.hits
+		}
+	}
+	if info.Last != nil {
+		fillCounts(info.Last)
+	}
+	for i := range info.Answers {
+		fillCounts(&info.Answers[i])
+	}
+	for i := range info.Negative {
+		fillCounts(&info.Negative[i])
 	}
 	s.mu.Unlock()
 

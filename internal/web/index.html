@@ -717,8 +717,9 @@ async function showDomain(name) {
 
 function renderDomain(d) {
   document.getElementById('m-title').textContent = d.domain;
-  document.getElementById('m-meta').textContent =
-    'Requests: ' + fmt(d.total) + ' · Cache hits: ' + fmt(d.cache_hits);
+  // Счётчики в шапке не показываем: каждая карточка ответа — отдельная
+  // запись (домен, тип) со своими Requests/Cache hits.
+  document.getElementById('m-meta').textContent = '';
 
   const box = document.getElementById('m-last');
   box.innerHTML = '';
@@ -795,6 +796,7 @@ function renderAnswer(last) {
   if (blocked) rows.push(['Reason', 'BLOCKED', 'rcode-err']);
   else if (!ok) rows.push(['Reason', last.rcode || '—', 'rcode-err']);
   rows.push(['Type', last.qtype || '—']);
+  pushCounts(rows, last);
   rows.push(['Source', sourceLabel(last, blocked)]);
   if (blocked && last.blocked_by) rows.push(['Blocked by', last.blocked_by]);
   if (!last.from_cache && last.duration_ms > 0) rows.push(['Duration', fmtDuration(last.duration_ms)]);
@@ -826,8 +828,9 @@ function renderNegative(last) {
     ['Status', 'Bad', 'rcode-err'],
     ['Reason', reason, nodata ? 'rcode-warn' : 'rcode-err'],
     ['Type', last.qtype || '—'],
-    ['Source', sourceLabel(last, false)],
   ];
+  pushCounts(rows, last);
+  rows.push(['Source', sourceLabel(last, false)]);
   if (!last.from_cache && last.duration_ms > 0) rows.push(['Duration', fmtDuration(last.duration_ms)]);
   rows.push(['Time', when]);
   card.appendChild(renderMeta(rows));
@@ -862,6 +865,7 @@ function renderLast(last) {
     rows.push(['Reason', reason, nodata && !last.timeout ? 'rcode-warn' : 'rcode-err']);
   }
   rows.push(['Type', last.qtype || '—']);
+  pushCounts(rows, last);
   rows.push(['Source', sourceLabel(last, blocked)]);
   if (!last.from_cache && last.duration_ms > 0) rows.push(['Duration', fmtDuration(last.duration_ms)]);
   rows.push(['Time', fmtTime(last.at)]);
@@ -873,6 +877,14 @@ function renderLast(last) {
   }
   appendAttempts(card, last);
   return card;
+}
+
+// pushCounts добавляет в мета-таблицу карточки счётчики запросов этого типа.
+// Сервер отдаёт их в каждой записи (домен, тип) отдельно, поэтому в карточке
+// A и карточке HTTPS одного домена цифры независимы.
+function pushCounts(rows, a) {
+  rows.push(['Requests', fmt(a.total || 0)]);
+  rows.push(['Cache hits', fmt(a.cache_hits || 0)]);
 }
 
 function renderMeta(rows) {

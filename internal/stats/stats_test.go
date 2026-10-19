@@ -357,11 +357,22 @@ func TestDomainInfoLastAnswers(t *testing.T) {
 			t.Fatalf("AAAA records[%d] = %q, want %q", i, aaaa.Records[i], rec)
 		}
 	}
+	// Счётчики карточки — по типу запроса, а не сумма по домену: A спрашивали
+	// 3 раза (включая SERVFAIL), AAAA — 2 (один ответ из кэша).
+	if a.Total != 3 || a.CacheHits != 0 {
+		t.Fatalf("A counters = %d/%d, want 3/0", a.Total, a.CacheHits)
+	}
+	if aaaa.Total != 2 || aaaa.CacheHits != 1 {
+		t.Fatalf("AAAA counters = %d/%d, want 2/1", aaaa.Total, aaaa.CacheHits)
+	}
 	// Last — самый свежий выданный ответ (SERVFAIL), именно по нему строится
 	// Status в таблице доменов.
 	if di.Last == nil || di.Last.Rcode != "SERVFAIL" || di.Last.Error != "timeout" ||
 		!di.Last.At.Equal(time.Unix(140, 0)) {
 		t.Fatalf("last = %+v", di.Last)
+	}
+	if di.Last.Total != 3 || di.Last.CacheHits != 0 {
+		t.Fatalf("last counters = %d/%d, want 3/0", di.Last.Total, di.Last.CacheHits)
 	}
 
 	// Домен без успешных ответов: статистика есть, сводки нет.
@@ -480,6 +491,16 @@ func TestDomainInfoNegative(t *testing.T) {
 	}
 	if len(di.Negative) != 2 {
 		t.Fatalf("negative = %+v", di.Negative)
+	}
+	// Счётчики каждой карточки — свои, по типу запроса.
+	if a := di.Answers[0]; a.Total != 1 || a.CacheHits != 0 {
+		t.Fatalf("A counters = %d/%d, want 1/0", a.Total, a.CacheHits)
+	}
+	if n := di.Negative[0]; n.Total != 1 || n.CacheHits != 1 {
+		t.Fatalf("HTTPS counters = %d/%d, want 1/1", n.Total, n.CacheHits)
+	}
+	if n := di.Negative[1]; n.Total != 1 || n.CacheHits != 0 {
+		t.Fatalf("AAAA counters = %d/%d, want 1/0", n.Total, n.CacheHits)
 	}
 	// Свежие сверху.
 	if di.Negative[0].Qtype != "HTTPS" || di.Negative[0].Rcode != "NXDOMAIN" || !di.Negative[0].FromCache {
