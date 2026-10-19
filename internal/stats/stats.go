@@ -812,6 +812,7 @@ func isBadStatus(status string) bool {
 }
 
 // statusOf классифицирует последний ответ домена для колонки Status.
+// NODATA для AAAA/HTTPS/SVCB — штатный ответ и получает статус ok.
 func statusOf(a *AnswerInfo) string {
 	switch {
 	case a == nil:
@@ -824,11 +825,25 @@ func statusOf(a *AnswerInfo) string {
 		return "nxdomain"
 	case a.successful():
 		return "ok"
+	case a.Rcode == "NOERROR" && emptyIsNormal(a.Qtype):
+		// NODATA для AAAA/HTTPS/SVCB — штатный ответ: у домена может просто
+		// не быть IPv6- или HTTPS/SVCB-записей. Проблемой он не считается.
+		return "ok"
 	case a.Rcode == "NOERROR":
 		return "nodata"
 	default:
 		return "bad"
 	}
+}
+
+// emptyIsNormal сообщает, что пустой ответ (NOERROR без записей) для данного
+// типа запроса — штатная ситуация, а не признак подмены или сбоя резолвера.
+func emptyIsNormal(qtype string) bool {
+	switch qtype {
+	case "AAAA", "HTTPS", "SVCB":
+		return true
+	}
+	return false
 }
 
 // normalize приводит имя к каноническому виду: нижний регистр без завершающей

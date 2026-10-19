@@ -714,6 +714,7 @@ func TestDomainStatus(t *testing.T) {
 
 	// Разные типы запросов к одному домену — отдельные строки со своим
 	// статусом; последний ответ одного типа не меняет статус другого.
+	// NODATA для AAAA — штатный ответ, поэтому строка AAAA получает статус ok.
 	now = time.Unix(40, 0)
 	s.Record("multi.test.", "g", false, &AnswerInfo{
 		Rcode: "NOERROR", Qtype: "A", Records: []string{"multi.test. 60 IN A 1.1.1.1"},
@@ -732,8 +733,8 @@ func TestDomainStatus(t *testing.T) {
 	for _, it := range multi.Items {
 		byType[it.Type] = it.Status
 	}
-	if byType["A"] != "ok" || byType["AAAA"] != "nodata" {
-		t.Fatalf("per-type status = %v, want A=ok AAAA=nodata", byType)
+	if byType["A"] != "ok" || byType["AAAA"] != "ok" {
+		t.Fatalf("per-type status = %v, want A=ok AAAA=ok", byType)
 	}
 
 	// Домен, заблокированный сейчас, получает статус blocked даже если
@@ -776,14 +777,14 @@ func TestDomainsPagePerType(t *testing.T) {
 	if a.Type != "A" || a.Total != 2 || a.CacheHits != 1 || a.Status != "ok" {
 		t.Fatalf("A row = %+v", a)
 	}
-	if https.Type != "HTTPS" || https.Total != 1 || https.Status != "nodata" {
+	if https.Type != "HTTPS" || https.Total != 1 || https.Status != "ok" {
 		t.Fatalf("HTTPS row = %+v", https)
 	}
 
-	// Фильтры работают по строкам: bad оставляет только HTTPS.
+	// NODATA по HTTPS — штатный ответ, поэтому в bad-фильтр он не попадает.
 	bad := s.DomainsPage(1, 0, "mdm.example.com", false, true, "", nil)
-	if bad.Total != 1 || len(bad.Items) != 1 || bad.Items[0].Type != "HTTPS" {
-		t.Fatalf("bad page = %+v", bad)
+	if bad.Total != 0 || len(bad.Items) != 0 {
+		t.Fatalf("bad page = %+v, want empty", bad)
 	}
 
 	// Карточка домена: общий Total, но успешный ответ только по A. NODATA по
@@ -798,6 +799,42 @@ func TestDomainsPagePerType(t *testing.T) {
 	}
 	if len(di.Negative) != 1 || di.Negative[0].Qtype != "HTTPS" {
 		t.Fatalf("negative = %+v", di.Negative)
+	}
+}
+
+// TestNoDataNormalTypes проверяет, что NODATA для AAAA/HTTPS/SVCB — штатный
+// ответ: он не считается проблемным, не попадает в счётчик nodata и в фильтр
+// bad=1, но по-прежнему хранится как негативный по типу (виден в карточке).
+func TestNoDataNormalTypes(t *testing.T) {
+	s := New(0)
+	cases := []struct{ qtype, domain string }{
+		{"AAAA", "aaaa.test"},
+		{"HTTPS", "https.test"},
+		{"SVCB", "svcb.test"},
+	}
+	for _, tc := range cases {
+		s.Record(tc.domain+".", "g", false, &AnswerInfo{Rcode: "NOERROR", Qtype: tc.qtype})
+	}
+	// NODATA для A остаётся проблемным ответом.
+	s.Record("a.test.", "g", false, &AnswerInfo{Rcode: "NOERROR", Qtype: "A"})
+
+	for _, tc := range cases {
+		page := s.DomainsPage(1, 0, tc.domain, false, false, "", nil)
+		if len(page.Items) != 1 || page.Items[0].Status != "ok" {
+			t.Fatalf("%s status = %+v, want ok", tc.qtype, page.Items)
+		}
+	}
+	if got := s.Snapshot().Nodata; got != 1 {
+		t.Fatalf("nodata = %d, want 1 (только A)", got)
+	}
+	bad := s.DomainsPage(1, 0, "", false, true, "", nil)
+	if bad.Total != 1 || bad.Items[0].Domain != "a.test" {
+		t.Fatalf("bad=1 page = %+v", bad)
+	}
+	// Ответ по-прежнему виден в карточке домена как негативный по типу.
+	di, ok := s.DomainInfo("https.test")
+	if !ok || len(di.Negative) != 1 || di.Negative[0].Qtype != "HTTPS" {
+		t.Fatalf("https domain info = %+v", di)
 	}
 }
 

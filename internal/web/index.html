@@ -786,7 +786,12 @@ function renderAnswer(last) {
 
   const when = fmtTime(last.at);
   const blocked = !!last.blocked;
-  const ok = last.rcode === 'NOERROR' && !!(last.records && last.records.length);
+  // NODATA для AAAA/HTTPS/SVCB — штатный ответ (у домена может не быть
+  // IPv6- или HTTPS/SVCB-записей), поэтому он не считается проблемой.
+  const emptyIsNormal = last.rcode === 'NOERROR' &&
+    ['AAAA', 'HTTPS', 'SVCB'].indexOf(last.qtype) !== -1;
+  const ok = last.rcode === 'NOERROR' &&
+    (!!(last.records && last.records.length) || emptyIsNormal);
   const rows = [
     ['Status', blocked || !ok ? 'Bad' : 'OK', blocked || !ok ? 'rcode-err' : 'rcode-ok'],
   ];

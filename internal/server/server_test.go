@@ -398,6 +398,50 @@ func TestServeDNSRecordsNoDataAttempts(t *testing.T) {
 	}
 }
 
+// TestServeDNSNoDataHTTPSNotBad проверяет, что NODATA по HTTPS — штатный ответ:
+// клиенту отдаётся NODATA, в статистике он не проблемный, а в кэше живёт не
+// меньше MIN-TTL; цепочка попыток (primary + fallback) сохраняется.
+func TestServeDNSNoDataHTTPSNotBad(t *testing.T) {
+	resp := new(dns.Msg)
+	resp.SetQuestion("example.com.", dns.TypeHTTPS)
+	resp.Response = true
+	soa, _ := dns.NewRR("example.com. 30 IN SOA ns.example.com. hostmaster.example.com. 1 2 3 4 30")
+	resp.Ns = append(resp.Ns, soa)
+	fa := &fakeExchanger{resp: resp, attempts: []upstream.Attempt{
+		{Upstream: "udp://192.168.1.1:53", Rcode: dns.RcodeSuccess, Nodata: true, Elapsed: 4 * time.Millisecond},
+		{Upstream: "doh+https://9.9.9.9/dns-query", Rcode: dns.RcodeSuccess, Nodata: true, Elapsed: 40 * time.Millisecond},
+	}}
+	ss := stats.New(0)
+	c := cache.New(100, 60, 0, 0)
+	s := newTestServer(testState(fa, fa, 60), c, ss)
+
+	w := &mockWriter{}
+	s.ServeDNS(w, query("example.com", dns.TypeHTTPS))
+	if w.msg == nil || w.msg.Rcode != dns.RcodeSuccess || len(w.msg.Answer) != 0 {
+		t.Fatalf("reply = %+v, want NODATA", w.msg)
+	}
+
+	di, ok := ss.DomainInfo("example.com")
+	if !ok || di.Status != "ok" {
+		t.Fatalf("domain status = %+v, want ok", di)
+	}
+	if len(di.Negative) != 1 || len(di.Negative[0].Attempts) != 2 {
+		t.Fatalf("negative = %+v", di.Negative)
+	}
+	if got := ss.Snapshot().Nodata; got != 0 {
+		t.Fatalf("nodata counter = %d, want 0", got)
+	}
+
+	// Ответ закэширован с MIN-TTL (60s), несмотря на SOA minttl = 30s.
+	msg, _, ok := c.Get(dns.Question{Name: "example.com.", Qtype: dns.TypeHTTPS, Qclass: dns.ClassINET}, false)
+	if !ok {
+		t.Fatal("NODATA must be cached")
+	}
+	if len(msg.Ns) != 1 || msg.Ns[0].Header().Ttl < 59 {
+		t.Fatalf("cached TTL = %+v, want >= 59 (MIN-TTL)", msg.Ns)
+	}
+}
+
 // TestServeDNSPositiveAfterNoDataKeepsChain проверяет, что у успешного ответа,
 // полученного после NODATA основного сервера, сохраняется вся цепочка попыток.
 func TestServeDNSPositiveAfterNoDataKeepsChain(t *testing.T) {

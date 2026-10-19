@@ -103,6 +103,11 @@ func (c *Cache) Put(q dns.Question, do bool, m *dns.Msg, upstream string) {
 	}
 	c.Apply(m)
 	ttl := minTTLOf(m)
+	// NODATA для AAAA/HTTPS/SVCB — штатный ответ: TTL не ниже MIN-TTL, как у
+	// положительных ответов. Потолок neg_ttl к нему по-прежнему применяется.
+	if emptyIsNormal(q, m) && ttl < c.minTTL {
+		ttl = c.minTTL
+	}
 	if ttl == 0 {
 		return
 	}
@@ -232,4 +237,18 @@ func minTTLOf(m *dns.Msg) uint32 {
 // (NOERROR без записей в Answer).
 func isNegative(m *dns.Msg) bool {
 	return m.Rcode == dns.RcodeNameError || (m.Rcode == dns.RcodeSuccess && len(m.Answer) == 0)
+}
+
+// emptyIsNormal сообщает, что NODATA для типа запроса — штатная ситуация:
+// у домена может не быть IPv6- или HTTPS/SVCB-записей. Такой ответ кэшируется
+// с обычным MIN-TTL, а не только по SOA minttl.
+func emptyIsNormal(q dns.Question, m *dns.Msg) bool {
+	if m.Rcode != dns.RcodeSuccess || len(m.Answer) != 0 {
+		return false
+	}
+	switch q.Qtype {
+	case dns.TypeAAAA, dns.TypeHTTPS, dns.TypeSVCB:
+		return true
+	}
+	return false
 }

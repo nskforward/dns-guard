@@ -127,6 +127,71 @@ func TestNegativeTTLCap(t *testing.T) {
 	}
 }
 
+// TestNoDataNormalTypesMinTTL проверяет, что NODATA для AAAA/HTTPS/SVCB
+// кэшируется не меньше MIN-TTL, даже если SOA minttl меньше, а при отсутствии
+// SOA — ровно MIN-TTL.
+func TestNoDataNormalTypesMinTTL(t *testing.T) {
+	for _, qtype := range []uint16{dns.TypeAAAA, dns.TypeHTTPS, dns.TypeSVCB} {
+		now := time.Unix(0, 0)
+		c := newWithClock(10, 60, 0, 0, func() time.Time { return now })
+		m, q := noDataMsg("example.com", qtype, 30, 30)
+		c.Put(q, false, m, "")
+
+		now = time.Unix(59, 0)
+		if _, _, ok := c.Get(q, false); !ok {
+			t.Fatalf("type %d: entry must be cached for MIN-TTL", qtype)
+		}
+		now = time.Unix(61, 0)
+		if _, _, ok := c.Get(q, false); ok {
+			t.Fatalf("type %d: entry must expire after MIN-TTL", qtype)
+		}
+	}
+
+	// NODATA без SOA тоже кэшируется на MIN-TTL.
+	now := time.Unix(0, 0)
+	c := newWithClock(10, 60, 0, 0, func() time.Time { return now })
+	q := dns.Question{Name: "example.com.", Qtype: dns.TypeHTTPS, Qclass: dns.ClassINET}
+	m := new(dns.Msg)
+	m.Question = []dns.Question{q}
+	m.Response = true
+	c.Put(q, false, m, "")
+	now = time.Unix(59, 0)
+	if _, _, ok := c.Get(q, false); !ok {
+		t.Fatal("NODATA without SOA must be cached for MIN-TTL")
+	}
+}
+
+// TestNoDataNormalTypesNegTTLCap проверяет, что потолок neg_ttl применяется к
+// NODATA для AAAA/HTTPS/SVCB и имеет приоритет над MIN-TTL.
+func TestNoDataNormalTypesNegTTLCap(t *testing.T) {
+	now := time.Unix(0, 0)
+	c := newWithClock(10, 60, 0, 10, func() time.Time { return now })
+	m, q := noDataMsg("example.com", dns.TypeHTTPS, 3600, 3600)
+	c.Put(q, false, m, "")
+
+	now = time.Unix(9, 0)
+	if _, _, ok := c.Get(q, false); !ok {
+		t.Fatal("entry must be cached within neg_ttl cap")
+	}
+	now = time.Unix(11, 0)
+	if _, _, ok := c.Get(q, false); ok {
+		t.Fatal("entry must expire after neg_ttl cap, not after MIN-TTL")
+	}
+}
+
+// noDataMsg формирует NODATA-ответ (NOERROR без записей) с SOA в authority.
+func noDataMsg(name string, qtype uint16, soaTTL, soaMinTTL uint32) (*dns.Msg, dns.Question) {
+	fqdn := dns.Fqdn(name)
+	q := dns.Question{Name: fqdn, Qtype: qtype, Qclass: dns.ClassINET}
+	m := new(dns.Msg)
+	m.Question = []dns.Question{q}
+	m.Response = true
+	soa, _ := dns.NewRR(fmt.Sprintf("%s %d IN SOA ns.%s hostmaster.%s 1 2 3 4 %d",
+		fqdn, soaTTL, fqdn, fqdn, soaMinTTL))
+	m.Ns = []dns.RR{soa}
+	return m, q
+}
+
 // TestPutUsesClientQuestionAndDO проверяет, что ключ кэша строится по вопросу
 // клиента, а не по вопросу, который эхоил апстрим.
 func TestPutUsesClientQuestionAndDO(t *testing.T) {
