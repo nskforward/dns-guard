@@ -51,19 +51,16 @@
   tr.clickable:active td, tr.group-row:active td { background:rgba(79,156,249,.14); }
   td.domain { word-break:break-all; }
   td.qtype { width:1%; white-space:nowrap; }
-  /* Типы запросов домена: кликабельные бейджи, цвет — статус последнего ответа. */
-  .qbadges { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
-  button.qbadge { display:inline-flex; align-items:center; justify-content:center; min-height:24px; padding:2px 9px; border:1px solid currentColor; border-radius:999px; background:transparent; color:var(--muted); font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+  /* Типы запросов домена: кликабельные бейджи в одну строку, цвет — статус
+     последнего ответа. nowrap удерживает все бейджи в ряд и не даёт колонке
+     сжаться до ширины одного бейджа. */
+  .qbadges { display:inline-flex; flex-wrap:nowrap; gap:6px; align-items:center; max-width:100%; }
+  button.qbadge { display:inline-flex; align-items:center; justify-content:center; flex:none; min-height:24px; padding:2px 9px; border:1px solid currentColor; border-radius:999px; background:transparent; color:var(--muted); font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; cursor:pointer; -webkit-tap-highlight-color:transparent; }
   button.qbadge:hover { filter:brightness(1.25); }
   button.qbadge:active { filter:brightness(.85); }
   button.qbadge.ok { color:var(--ok); background:rgba(63,185,80,.12); }
   button.qbadge.warn { color:var(--warn); background:rgba(210,153,34,.12); }
   button.qbadge.err { color:var(--err); background:rgba(248,81,73,.12); }
-  /* Last-answer status: green check / red cross */
-  td.st { width:1%; text-align:center; white-space:nowrap; }
-  td.st svg { width:18px; height:18px; vertical-align:middle; }
-  td.st.ok { color:var(--ok); }
-  td.st.bad { color:var(--err); }
 
   /* Blocked domains: мягкая красная подсветка и кнопка block/unblock */
   tr.blocked td { background:rgba(248,81,73,.06); }
@@ -170,12 +167,10 @@
     tbody td.domain, tbody td.name { grid-column:1/-1; font-weight:600; word-break:break-all; padding-right:34px; }
     tbody td.blk { position:absolute; top:8px; right:8px; width:auto; }
     tbody td.num { display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
-    tbody td.qtype { grid-column:1/-1; display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+    tbody td.qtype { grid-column:1/-1; display:flex; align-items:center; gap:8px; min-width:0; }
     tbody td.qtype::before { content:attr(data-label); color:var(--muted); font-size:12px; flex:none; }
-    .qbadges { gap:8px; }
+    .qbadges { flex:1 1 auto; min-width:0; gap:8px; overflow-x:auto; -webkit-overflow-scrolling:touch; padding-bottom:2px; }
     button.qbadge { min-height:32px; padding:4px 12px; font-size:13px; }
-    tbody td.st { display:flex; align-items:center; justify-content:space-between; gap:8px; }
-    tbody td.st::before { content:attr(data-label); color:var(--muted); font-size:12px; flex:none; }
     tbody td.num::before, tbody td.kv::before, tbody td.wide::before { content:attr(data-label); color:var(--muted); font-size:12px; flex:none; }
     tbody td.kv { display:flex; align-items:baseline; justify-content:space-between; gap:8px; font-size:13px; }
     tbody td.wide { grid-column:1/-1; display:flex; align-items:baseline; gap:6px; }
@@ -263,7 +258,7 @@
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>#</th><th>Domain</th><th>Type</th><th>Status</th><th class="num">Requests</th><th class="num">Cache Hits</th><th class="blk"></th></tr></thead>
+        <thead><tr><th>#</th><th>Domain</th><th>Type</th><th class="num">Requests</th><th class="num">Cache Hits</th><th class="blk"></th></tr></thead>
         <tbody id="top"></tbody>
       </table>
     </div>
@@ -430,7 +425,7 @@ function renderRows(items) {
   if (!items.length) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 7;
+    td.colSpan = 6;
     td.className = 'empty muted';
     td.textContent = domainFilter === 'blocked' ? 'No blocked domains'
       : domainFilter === 'bad' ? 'No domains with bad answers'
@@ -447,12 +442,10 @@ function renderRows(items) {
     tr.innerHTML = '<td class="idx muted">' + ((page - 1) * PAGE_SIZE + i + 1) + '</td>' +
       '<td class="domain" data-label="Domain"></td>' +
       '<td class="qtype" data-label="Type"></td>' +
-      '<td class="st" data-label="Status"></td>' +
       '<td class="num" data-label="Requests">' + fmt(x.total) + '</td>' +
       '<td class="num" data-label="Cache hits">' + fmt(x.cache_hits) + '</td>';
     tr.children[1].textContent = x.domain;
     tr.replaceChild(typeCell(x), tr.children[2]);
-    tr.replaceChild(statusCell(x), tr.children[3]);
     tr.appendChild(blockCell(x));
     body.appendChild(tr);
   });
@@ -502,37 +495,6 @@ function badgeStatusLabel(status) {
     ok: 'OK', nodata: 'NODATA', nxdomain: 'NXDOMAIN',
     servfail: 'SERVFAIL', bad: 'error', blocked: 'blocked',
   })[status] || status || 'no answer';
-}
-
-// statusCell — иконка состояния последнего ответа домена: зелёная галка при
-// успешном ответе, красный крест при проблеме. Причина — в подсказке.
-function statusCell(x) {
-  const td = document.createElement('td');
-  td.className = 'st';
-  td.dataset.label = 'Status';
-  const st = x.status || '';
-  if (!st) {
-    td.classList.add('muted');
-    td.title = 'No answer recorded yet';
-    td.textContent = '—';
-    return td;
-  }
-  const ok = st === 'ok';
-  td.classList.add(ok ? 'ok' : 'bad');
-  const reasons = {
-    ok: 'Last answer: OK',
-    servfail: 'Last answer: SERVFAIL',
-    nxdomain: 'Last answer: NXDOMAIN',
-    nodata: 'Last answer: NODATA',
-    bad: 'Last answer: error',
-  };
-  td.title = st === 'blocked'
-    ? (x.blocked_by ? 'Blocked by ' + x.blocked_by : 'Blocked')
-    : (reasons[st] || 'Last answer: ' + st);
-  td.innerHTML = ok
-    ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9.5"/></svg>'
-    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9 9l6 6"/><path d="M15 9l-6 6"/></svg>';
-  return td;
 }
 
 // blockCell — кнопка block/unblock в строке домена. Если домен заблокирован
