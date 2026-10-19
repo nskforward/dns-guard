@@ -731,18 +731,21 @@ function renderDomain(d) {
   const last = d.last || null;
   const lastSt = lastStatus(last);
   const showLast = lastSt !== '' && lastSt !== 'ok' && lastSt !== 'blocked';
-  // Заблокированный ответ уже показан карточкой ответа (Status/Reason/Source/
-  // Blocked by), поэтому отдельную сводку о блокировке для него не выводим.
-  const blockedAnswer = answers.some(a => a.blocked);
+  // Блокировка — вердикт домена целиком, а не ответ на конкретный тип запроса,
+  // поэтому показываем его одной карточкой: сервер не отдаёт заглушки блоклиста
+  // в Answers, чтобы не возникало истории BLOCKED по каждому qtype.
   if (showLast) box.appendChild(renderLast(last));
-  if (d.blocked && !blockedAnswer) {
+  if (d.blocked) {
     const card = document.createElement('div');
     card.className = 'answer-card';
-    card.appendChild(renderMeta([
+    const rows = [
       ['Status', 'Bad', 'rcode-err'],
       ['Reason', 'BLOCKED', 'rcode-err'],
       ['Blocked by', d.blocked_by || d.domain],
-    ]));
+    ];
+    // Время последнего заблокированного запроса, если он известен.
+    if (last && last.blocked && last.at) rows.push(['Time', fmtTime(last.at)]);
+    card.appendChild(renderMeta(rows));
     box.appendChild(card);
   }
   if (!answers.length && !negative.length && !showLast) {

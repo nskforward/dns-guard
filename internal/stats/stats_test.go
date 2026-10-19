@@ -545,27 +545,46 @@ func TestAnswersPerDomainLimit(t *testing.T) {
 }
 
 // TestRecordBlocked проверяет, что заблокированный ответ не считается
-// попаданием/промахом кэша, увеличивает счётчик Blocked и сохраняется в сводке
-// домена как ответ блоклиста.
+// попаданием/промахом кэша, увеличивает счётчик Blocked, вытесняет прежние
+// записи своего типа и не превращается в per-type историю в карточке домена.
 func TestRecordBlocked(t *testing.T) {
 	s := New(0)
+	// До блокировки по A был успешный ответ: блокировка должна вытеснить его,
+	// чтобы устаревшие адреса не показывались в карточке.
+	s.Record("ads.example.com.", "", false, &AnswerInfo{
+		Rcode:   "NOERROR",
+		Qtype:   "A",
+		Records: []string{"ads.example.com. 60 IN A 1.2.3.4"},
+	})
 	s.Record("ads.example.com.", "", false, &AnswerInfo{
 		Rcode:     "NOERROR",
 		Qtype:     "A",
 		Blocked:   true,
 		BlockedBy: "example.com",
 	})
+	// Блокировка — вердикт домена, а не типа: запросы разных типов не должны
+	// давать в Answers отдельные BLOCKED-записи.
+	s.Record("ads.example.com.", "", false, &AnswerInfo{
+		Rcode:     "NOERROR",
+		Qtype:     "HTTPS",
+		Blocked:   true,
+		BlockedBy: "example.com",
+	})
 
 	snap := s.Snapshot()
-	if snap.Blocked != 1 || snap.CacheHits != 0 || snap.CacheMisses != 0 || snap.Total != 1 {
+	if snap.Blocked != 2 || snap.CacheHits != 0 || snap.CacheMisses != 1 || snap.Total != 3 {
 		t.Fatalf("snapshot = %+v", snap)
 	}
 	di, ok := s.DomainInfo("ads.example.com")
-	if !ok || len(di.Answers) != 1 || !di.Answers[0].Blocked || di.Answers[0].BlockedBy != "example.com" {
-		t.Fatalf("domain info = %+v", di)
+	if !ok || len(di.Answers) != 0 {
+		t.Fatalf("blocked answers must not be listed per type: %+v", di)
 	}
 	if len(di.Negative) != 0 {
 		t.Fatalf("blocked answer must not be negative: %+v", di.Negative)
+	}
+	// Вердикт доступен через Last (по нему UI строит одну карточку блокировки).
+	if di.Last == nil || !di.Last.Blocked || di.Last.BlockedBy != "example.com" || di.Last.Qtype != "HTTPS" {
+		t.Fatalf("last blocked answer = %+v", di.Last)
 	}
 }
 

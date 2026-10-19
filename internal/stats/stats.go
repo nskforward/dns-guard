@@ -646,7 +646,7 @@ func (s *Stats) DomainInfo(name string) (DomainInfo, bool) {
 		info.Last = &cp
 	}
 	if len(d.answers) > 0 {
-		info.Answers = latestByQtype(d.answers)
+		info.Answers = successfulAnswers(d.answers)
 	}
 	if len(d.negative) > 0 {
 		info.Negative = latestByQtype(d.negative)
@@ -654,6 +654,22 @@ func (s *Stats) DomainInfo(name string) (DomainInfo, bool) {
 	s.mu.Unlock()
 
 	return info, true
+}
+
+// successfulAnswers возвращает последние успешные ответы по qtype, свежие
+// сверху, без заглушек блоклиста. Блокировка — вердикт домена целиком, а не
+// ответ на конкретный тип: в карточке она показывается одной записью (по
+// текущему блоклисту и Last), а не историей по каждому типу запроса.
+func successfulAnswers(m map[string]*AnswerInfo) []AnswerInfo {
+	out := make([]AnswerInfo, 0, len(m))
+	for _, a := range m {
+		if a.Blocked {
+			continue
+		}
+		out = append(out, cloneAnswer(a, a.At))
+	}
+	sortLatest(out)
+	return out
 }
 
 // latestByQtype возвращает по одному последнему ответу на каждый тип запроса,
@@ -665,13 +681,19 @@ func latestByQtype(m map[string]*AnswerInfo) []AnswerInfo {
 	for _, a := range m {
 		out = append(out, cloneAnswer(a, a.At))
 	}
+	sortLatest(out)
+	return out
+}
+
+// sortLatest упорядочивает ответы: свежие сверху, при равном времени — по
+// типу запроса, чтобы порядок карточек был стабильным.
+func sortLatest(out []AnswerInfo) {
 	sort.Slice(out, func(i, j int) bool {
 		if !out[i].At.Equal(out[j].At) {
 			return out[i].At.After(out[j].At)
 		}
 		return out[i].Qtype < out[j].Qtype
 	})
-	return out
 }
 
 // cloneAnswer делает глубокую копию AnswerInfo, подставляя at, если время не

@@ -42,11 +42,14 @@ func TestServeDNSBlockedNoData(t *testing.T) {
 		t.Fatalf("snapshot = %+v", snap)
 	}
 	info, ok := ss.DomainInfo("a.b.example.com")
-	if !ok || len(info.Answers) != 1 {
-		t.Fatalf("blocked answer not recorded: %+v", info)
+	if !ok {
+		t.Fatalf("blocked domain not recorded: %+v", info)
 	}
-	if !info.Answers[0].Blocked || info.Answers[0].BlockedBy != "example.com" {
-		t.Fatalf("answer = %+v", info.Answers[0])
+	if len(info.Answers) != 0 {
+		t.Fatalf("blocked answers must not be listed per type: %+v", info.Answers)
+	}
+	if info.Last == nil || !info.Last.Blocked || info.Last.BlockedBy != "example.com" {
+		t.Fatalf("last blocked answer = %+v", info.Last)
 	}
 }
 
