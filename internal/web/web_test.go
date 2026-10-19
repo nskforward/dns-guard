@@ -126,6 +126,92 @@ func TestDomainsAPI(t *testing.T) {
 	}
 }
 
+func TestDomainTypeAPI(t *testing.T) {
+	st := stats.New(0)
+	st.Record("dual.example.com.", "g", false, &stats.AnswerInfo{
+		Rcode:    "NOERROR",
+		Qtype:    "A",
+		Records:  []string{"dual.example.com. 60 IN A 1.2.3.4"},
+		Upstream: "1.1.1.1:53",
+	})
+	st.Record("dual.example.com.", "g", false, &stats.AnswerInfo{
+		Rcode:    "NOERROR",
+		Qtype:    "HTTPS",
+		Records:  []string{"dual.example.com. 60 IN HTTPS 1 . alpn=h2"},
+		Upstream: "1.1.1.1:53",
+	})
+	h := New(Deps{Stats: st}).Handler()
+
+	// Без type — сводка по всем типам (обратная совместимость).
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/domain?name=dual.example.com", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("all types status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var info stats.DomainInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(info.Answers) != 2 {
+		t.Fatalf("all types answers = %+v, want A and HTTPS", info.Answers)
+	}
+
+	// type=A — только последний ответ этого типа и его счётчики.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/domain?name=dual.example.com&type=A", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("type=A status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var scoped stats.DomainInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &scoped); err != nil {
+		t.Fatalf("decode A: %v", err)
+	}
+	if scoped.Type != "A" || scoped.Last == nil || scoped.Last.Qtype != "A" {
+		t.Fatalf("type=A info = %+v, last = %+v", scoped.DomainStat, scoped.Last)
+	}
+	if len(scoped.Last.Records) != 1 || !strings.Contains(scoped.Last.Records[0], "IN A") {
+		t.Fatalf("type=A records = %+v", scoped.Last.Records)
+	}
+	if scoped.Total != 1 || len(scoped.Answers) != 0 || len(scoped.Negative) != 0 {
+		t.Fatalf("type=A must be scoped: %+v", scoped)
+	}
+
+	// Регистр type не важен.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/domain?name=dual.example.com&type=https", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("type=https status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var scopedHTTPS stats.DomainInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &scopedHTTPS); err != nil {
+		t.Fatalf("decode HTTPS: %v", err)
+	}
+	if scopedHTTPS.Type != "HTTPS" || scopedHTTPS.Last == nil || scopedHTTPS.Last.Qtype != "HTTPS" {
+		t.Fatalf("type=https info = %+v, last = %+v", scopedHTTPS.DomainStat, scopedHTTPS.Last)
+	}
+	if len(scopedHTTPS.Last.Records) != 1 || !strings.Contains(scopedHTTPS.Last.Records[0], "IN HTTPS") {
+		t.Fatalf("type=HTTPS records = %+v", scopedHTTPS.Last.Records)
+	}
+
+	// Неизвестный тип у известного домена — 404.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/domain?name=dual.example.com&type=AAAA", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown type status = %d, want 404", rec.Code)
+	}
+}
+
+func TestIndexNoStore(t *testing.T) {
+	rec := httptest.NewRecorder()
+	New(Deps{}).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+}
+
 func TestDomainNegativeAPI(t *testing.T) {
 	st := stats.New(0)
 	st.Record("nx.example.com.", "g", false, &stats.AnswerInfo{

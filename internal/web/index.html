@@ -104,6 +104,7 @@
   .meta-list { display:grid; grid-template-columns:max-content 1fr; gap:4px 16px; margin-top:8px; }
   .meta-list .mk { color:var(--muted); }
   .meta-list .mv { word-break:break-all; }
+  .type-badge { display:inline-block; margin-left:8px; padding:2px 8px; border:1px solid var(--line); border-radius:999px; color:var(--muted); font-size:12px; vertical-align:middle; }
   .answer-card { border-top:1px solid var(--line); padding-top:12px; margin-top:12px; }
   .answer-card:first-child { border-top:none; padding-top:0; margin-top:0; }
   .answer-card .sub { color:var(--muted); margin-top:10px; }
@@ -288,7 +289,7 @@
 <div id="modal" class="modal hide" onclick="closeModal(event)">
   <div class="modal-box" onclick="event.stopPropagation()">
     <div class="modal-head">
-      <h3 id="m-title"></h3>
+      <h3><span id="m-title"></span><span id="m-type" class="type-badge hide"></span></h3>
       <button class="act secondary" onclick="closeModal()">Close</button>
     </div>
     <div class="modal-body">
@@ -442,7 +443,9 @@ function renderRows(items) {
     tr.children[2].textContent = x.type || '—';
     tr.replaceChild(statusCell(x), tr.children[3]);
     tr.appendChild(blockCell(x));
-    tr.addEventListener('click', () => showDomain(x.domain));
+    // Каждая строка — отдельная пара (домен, тип): модальное окно открывается
+    // только для неё и не смешивает ответы разных типов.
+    tr.addEventListener('click', () => showDomain(x.domain, x.type || ''));
     body.appendChild(tr);
   });
 }
@@ -696,16 +699,23 @@ function renderUpstreams(items) {
   });
 }
 
-async function showDomain(name) {
+async function showDomain(name, type) {
   const modal = document.getElementById('modal');
   document.getElementById('m-title').textContent = name;
+  const badge = document.getElementById('m-type');
+  badge.textContent = type || '';
+  badge.classList.toggle('hide', !type);
   document.getElementById('m-meta').textContent = 'Loading…';
   const box = document.getElementById('m-last');
   box.innerHTML = '';
   box.className = '';
   modal.classList.remove('hide');
   try {
-    const r = await fetch('/api/domain?name=' + encodeURIComponent(name), {cache:'no-store'});
+    // type необязателен: строка без типа (запросы без сведений о qtype)
+    // открывает сводку по домену, как раньше.
+    const url = '/api/domain?name=' + encodeURIComponent(name) +
+      (type ? '&type=' + encodeURIComponent(type) : '');
+    const r = await fetch(url, {cache:'no-store'});
     if (!r.ok) throw new Error(r.status === 404 ? 'No data for this domain' : 'HTTP ' + r.status);
     renderDomain(await r.json());
   } catch (e) {
@@ -715,63 +725,50 @@ async function showDomain(name) {
   }
 }
 
+// renderDomain рисует одно модальное окно для одной пары (домен, тип): внутри
+// ровно одна запись — последний ответ этого типа. Ответы других типов в это
+// окно не попадают: для них открывается своё окно из своей строки таблицы.
 function renderDomain(d) {
   document.getElementById('m-title').textContent = d.domain;
-  // Счётчики в шапке не показываем: каждая карточка ответа — отдельная
-  // запись (домен, тип) со своими Requests/Cache hits.
+  const badge = document.getElementById('m-type');
+  badge.textContent = d.type || '';
+  badge.classList.toggle('hide', !d.type);
+  // Счётчики в шапке не показываем: они есть в самой карточке.
   document.getElementById('m-meta').textContent = '';
 
   const box = document.getElementById('m-last');
   box.innerHTML = '';
   box.className = '';
-  const negative = d.negative || [];
-  const answers = d.answers || [];
-  // Последний ответ — тот, по которому построен Status в таблице. Показываем
-  // его первой карточкой, если он не успешный: так иконка всегда объяснима
-  // (SERVFAIL раньше не был виден в деталях вовсе).
+
   const last = d.last || null;
-  const lastSt = lastStatus(last);
-  const showLast = lastSt !== '' && lastSt !== 'ok' && lastSt !== 'blocked';
-  // Блокировка — вердикт домена целиком, а не ответ на конкретный тип запроса,
-  // поэтому показываем его одной карточкой: сервер не отдаёт заглушки блоклиста
-  // в Answers, чтобы не возникало истории BLOCKED по каждому qtype.
-  if (showLast) box.appendChild(renderLast(last));
+
+  // Блокировка — вердикт домена целиком: показываем её единственной карточкой
+  // и не выводим записи, которые больше не выдаются.
   if (d.blocked) {
-    const card = document.createElement('div');
-    card.className = 'answer-card';
-    const rows = [
-      ['Status', 'Bad', 'rcode-err'],
-      ['Reason', 'BLOCKED', 'rcode-err'],
-      ['Blocked by', d.blocked_by || d.domain],
-    ];
-    // Время последнего заблокированного запроса, если он известен.
-    if (last && last.blocked && last.at) rows.push(['Time', fmtTime(last.at)]);
-    card.appendChild(renderMeta(rows));
-    box.appendChild(card);
-  }
-  if (!answers.length && !negative.length && !showLast) {
-    if (!d.blocked) {
-      box.className = 'muted';
-      box.textContent = 'No answer recorded yet.';
-    }
+    box.appendChild(renderBlocked(d, last));
     return;
   }
-  answers.forEach(a => box.appendChild(renderAnswer(a)));
-  negative.forEach(n => {
-    // Не дублируем запись, уже показанную карточкой последнего ответа.
-    if (showLast && last && n.qtype === last.qtype && n.at === last.at) return;
-    box.appendChild(renderNegative(n));
-  });
+  if (!last) {
+    box.className = 'muted';
+    box.textContent = 'No answer recorded yet.';
+    return;
+  }
+  box.appendChild(renderAnswer(last));
 }
 
-// lastStatus повторяет серверную классификацию статуса последнего ответа.
-function lastStatus(a) {
-  if (!a) return '';
-  if (a.blocked) return 'blocked';
-  if (a.rcode === 'SERVFAIL') return 'servfail';
-  if (a.rcode === 'NXDOMAIN') return 'nxdomain';
-  if (a.rcode === 'NOERROR') return (a.records && a.records.length) ? 'ok' : 'nodata';
-  return 'bad';
+// renderBlocked — единственная карточка заблокированного домена.
+function renderBlocked(d, last) {
+  const card = document.createElement('div');
+  card.className = 'answer-card';
+  const rows = [
+    ['Status', 'Bad', 'rcode-err'],
+    ['Reason', 'BLOCKED', 'rcode-err'],
+    ['Type', d.type || (last && last.qtype) || '—'],
+    ['Blocked by', d.blocked_by || (last && last.blocked_by) || d.domain],
+  ];
+  if (last && last.at) rows.push(['Time', fmtTime(last.at)]);
+  card.appendChild(renderMeta(rows));
+  return card;
 }
 
 // sourceLabel объединяет источник ответа и адрес апстрима в одно поле:
@@ -789,12 +786,27 @@ function renderAnswer(last) {
 
   const when = fmtTime(last.at);
   const blocked = !!last.blocked;
-  const ok = last.rcode === 'NOERROR';
+  const ok = last.rcode === 'NOERROR' && !!(last.records && last.records.length);
   const rows = [
     ['Status', blocked || !ok ? 'Bad' : 'OK', blocked || !ok ? 'rcode-err' : 'rcode-ok'],
   ];
-  if (blocked) rows.push(['Reason', 'BLOCKED', 'rcode-err']);
-  else if (!ok) rows.push(['Reason', last.rcode || '—', 'rcode-err']);
+  if (blocked) {
+    rows.push(['Reason', 'BLOCKED', 'rcode-err']);
+  } else if (!ok) {
+    // Тот же разбор, что и в таблице: NODATA — NOERROR без записей,
+    // NXDOMAIN и SERVFAIL — проблемные ответы, timeout/error — сбой запроса.
+    let reason = last.rcode || '—';
+    let cls = 'rcode-err';
+    if (last.timeout) {
+      reason = 'Timeout';
+    } else if (last.error) {
+      reason = last.error;
+    } else if (last.rcode === 'NOERROR') {
+      reason = 'NODATA';
+      cls = 'rcode-warn';
+    }
+    rows.push(['Reason', reason, cls]);
+  }
   rows.push(['Type', last.qtype || '—']);
   pushCounts(rows, last);
   rows.push(['Source', sourceLabel(last, blocked)]);
@@ -807,70 +819,6 @@ function renderAnswer(last) {
     card.appendChild(subLabel('Answer'));
     card.appendChild(preBlock(last.records));
   }
-  if (last.authority && last.authority.length) {
-    card.appendChild(subLabel('Authority (NS)'));
-    card.appendChild(preBlock(last.authority));
-  }
-  appendAttempts(card, last);
-  return card;
-}
-
-// renderNegative — карточка негативного ответа (NODATA/NXDOMAIN): те же
-// атрибуты, что у успешного, плюс тип запроса и цепочка пройденных апстримов.
-function renderNegative(last) {
-  const card = document.createElement('div');
-  card.className = 'answer-card';
-
-  const when = fmtTime(last.at);
-  const nodata = last.rcode === 'NOERROR';
-  const reason = nodata ? 'NODATA' : (last.rcode || '—');
-  const rows = [
-    ['Status', 'Bad', 'rcode-err'],
-    ['Reason', reason, nodata ? 'rcode-warn' : 'rcode-err'],
-    ['Type', last.qtype || '—'],
-  ];
-  pushCounts(rows, last);
-  rows.push(['Source', sourceLabel(last, false)]);
-  if (!last.from_cache && last.duration_ms > 0) rows.push(['Duration', fmtDuration(last.duration_ms)]);
-  rows.push(['Time', when]);
-  card.appendChild(renderMeta(rows));
-
-  if (last.authority && last.authority.length) {
-    card.appendChild(subLabel('Authority (NS)'));
-    card.appendChild(preBlock(last.authority));
-  }
-  appendAttempts(card, last);
-  return card;
-}
-
-// renderLast — карточка последнего ответа домена (включая SERVFAIL): именно по
-// нему построена иконка Status в таблице доменов.
-function renderLast(last) {
-  const card = document.createElement('div');
-  card.className = 'answer-card';
-  card.appendChild(subLabel('Last answer'));
-
-  const blocked = !!last.blocked;
-  const st = lastStatus(last);
-  const ok = st === 'ok';
-  const nodata = st === 'nodata';
-  const rows = [
-    ['Status', ok ? 'OK' : 'Bad', ok ? 'rcode-ok' : 'rcode-err'],
-  ];
-  if (blocked) {
-    rows.push(['Reason', 'BLOCKED', 'rcode-err']);
-    if (last.blocked_by) rows.push(['Blocked by', last.blocked_by]);
-  } else if (!ok) {
-    const reason = last.timeout ? 'Timeout' : (last.error || (nodata ? 'NODATA' : (last.rcode || '—')));
-    rows.push(['Reason', reason, nodata && !last.timeout ? 'rcode-warn' : 'rcode-err']);
-  }
-  rows.push(['Type', last.qtype || '—']);
-  pushCounts(rows, last);
-  rows.push(['Source', sourceLabel(last, blocked)]);
-  if (!last.from_cache && last.duration_ms > 0) rows.push(['Duration', fmtDuration(last.duration_ms)]);
-  rows.push(['Time', fmtTime(last.at)]);
-  card.appendChild(renderMeta(rows));
-
   if (last.authority && last.authority.length) {
     card.appendChild(subLabel('Authority (NS)'));
     card.appendChild(preBlock(last.authority));

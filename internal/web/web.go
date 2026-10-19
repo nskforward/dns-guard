@@ -79,6 +79,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// UI меняется вместе с бинарником: запрещаем кэшировать HTML, иначе после
+	// обновления контейнера вкладка продолжает работать со старым JS.
+	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(data)
 }
 
@@ -138,7 +141,9 @@ func (s *Server) handleDomains(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDomain отдаёт статистику домена и сведения о последнем ответе:
-// GET /api/domain?name=example.com
+// GET /api/domain?name=example.com&type=A
+// Необязательный type ограничивает ответ одной парой (домен, тип): в ответе
+// остаётся только последний ответ этого типа и его счётчики.
 func (s *Server) handleDomain(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(r.URL.Query().Get("name"))
 	if name == "" {
@@ -149,7 +154,7 @@ func (s *Server) handleDomain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "stats unavailable", http.StatusNotFound)
 		return
 	}
-	info, ok := s.deps.Stats.DomainInfo(name)
+	info, ok := s.deps.Stats.DomainInfoType(name, r.URL.Query().Get("type"))
 	if !ok {
 		http.Error(w, "domain not found", http.StatusNotFound)
 		return

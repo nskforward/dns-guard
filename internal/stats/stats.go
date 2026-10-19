@@ -634,17 +634,52 @@ func (s *Stats) DomainsPage(page, size int, search string, blockedOnly, badOnly 
 // DomainInfo возвращает статистику домена и сводные сведения о нём: записи,
 // склеенные из последних успешных ответов по всем типам запроса.
 func (s *Stats) DomainInfo(name string) (DomainInfo, bool) {
+	return s.domainInfo(name, "")
+}
+
+// DomainInfoType возвращает сведения одной пары (домен, тип запроса): последний
+// ответ именно этого типа и счётчики этого типа. Пустой qtype равнозначен
+// DomainInfo. Регистр qtype не важен.
+func (s *Stats) DomainInfoType(name, qtype string) (DomainInfo, bool) {
+	return s.domainInfo(name, strings.ToUpper(strings.TrimSpace(qtype)))
+}
+
+func (s *Stats) domainInfo(name, qtype string) (DomainInfo, bool) {
 	key := normalize(name)
 	if key == "" {
 		return DomainInfo{}, false
 	}
 
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	d, ok := s.domains[key]
 	if !ok {
-		s.mu.Unlock()
 		return DomainInfo{}, false
 	}
+
+	// Срез по одной паре (домен, тип): модальное окно показывает только эту
+	// запись, без смешивания с другими типами запроса.
+	if qtype != "" {
+		ts := d.types[qtype]
+		if ts == nil {
+			return DomainInfo{}, false
+		}
+		info := DomainInfo{DomainStat: DomainStat{
+			Domain:    key,
+			Type:      qtype,
+			Status:    statusOf(ts.last),
+			Total:     ts.total,
+			CacheHits: ts.hits,
+		}}
+		if ts.last != nil {
+			cp := cloneAnswer(ts.last, ts.last.At)
+			cp.Total = ts.total
+			cp.CacheHits = ts.hits
+			info.Last = &cp
+		}
+		return info, true
+	}
+
 	info := DomainInfo{DomainStat: domainStat(key, d)}
 	if d.last != nil {
 		cp := cloneAnswer(d.last, d.last.At)
@@ -673,7 +708,6 @@ func (s *Stats) DomainInfo(name string) (DomainInfo, bool) {
 	for i := range info.Negative {
 		fillCounts(&info.Negative[i])
 	}
-	s.mu.Unlock()
 
 	return info, true
 }
