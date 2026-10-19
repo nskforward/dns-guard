@@ -55,7 +55,7 @@
      последнего ответа. nowrap удерживает все бейджи в ряд и не даёт колонке
      сжаться до ширины одного бейджа. */
   .qbadges { display:inline-flex; flex-wrap:nowrap; gap:6px; align-items:center; max-width:100%; }
-  button.qbadge { display:inline-flex; align-items:center; justify-content:center; flex:none; min-height:24px; padding:2px 9px; border:1px solid currentColor; border-radius:999px; background:transparent; color:var(--muted); font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+  button.qbadge { display:inline-flex; align-items:center; justify-content:center; flex:none; min-height:24px; padding:2px 9px; border:1px solid currentColor; border-radius:999px; background:transparent; color:var(--muted); font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; cursor:pointer; -webkit-tap-highlight-color:transparent; }
   button.qbadge:hover { filter:brightness(1.25); }
   button.qbadge:active { filter:brightness(.85); }
   button.qbadge.ok { color:var(--ok); background:rgba(63,185,80,.12); }
@@ -170,7 +170,7 @@
     tbody td.qtype { grid-column:1/-1; display:flex; align-items:center; gap:8px; min-width:0; }
     tbody td.qtype::before { content:attr(data-label); color:var(--muted); font-size:12px; flex:none; }
     .qbadges { flex:1 1 auto; min-width:0; gap:8px; overflow-x:auto; -webkit-overflow-scrolling:touch; padding-bottom:2px; }
-    button.qbadge { min-height:32px; padding:4px 12px; font-size:13px; }
+    button.qbadge { min-height:32px; padding:4px 12px; font-size:12px; }
     tbody td.num::before, tbody td.kv::before, tbody td.wide::before { content:attr(data-label); color:var(--muted); font-size:12px; flex:none; }
     tbody td.kv { display:flex; align-items:baseline; justify-content:space-between; gap:8px; font-size:13px; }
     tbody td.wide { grid-column:1/-1; display:flex; align-items:baseline; gap:6px; }
